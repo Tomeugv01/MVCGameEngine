@@ -62,7 +62,8 @@ public class BodyFactory {
                     profiler,
                     gravitySourceProvider,
                     gravityMassCoefficient,
-                    minGravityDistance)
+                    minGravityDistance,
+                    true /* isPlayer — uses playerGravityMultiplier for strong planet pull */)
                 : new BasicPhysicsEngine(dto1, dto2, dto3, profiler);
                 body = new PlayerBody(
                         bodyEventProcessor, spatialGrid, phyEngine,

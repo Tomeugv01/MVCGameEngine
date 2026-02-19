@@ -6,8 +6,24 @@ import engine.world.core.AbstractWorldDefinitionProvider;
 
 public final class SolarSystemWorldDefinitionProvider extends AbstractWorldDefinitionProvider {
 
-    private static final double BODY_SIZE_SCALE = 0.40d;
+    private static final double BODY_SIZE_SCALE   = 0.40d;
     private static final double PLAYER_SIZE_SCALE = 0.50d;
+
+    /**
+     * Gravitational parameter G*M_sun used to derive circular-orbit speeds.
+     *
+     * Must stay in sync with:
+     *   Model.GRAVITY_MASS_COEFFICIENT = 0.08
+     *   GravitySourceProvider radius   = body.size * 0.5
+     *
+     * Formula: GM = massCoeff * (sunHalfRadius)^3
+     *        = 0.08 * (scaledBody(2600) / 2)^3
+     *        = 0.08 * 520^3
+     */
+    private static final double GRAVITY_MASS_COEFF = 0.08d;
+    private static final double SUN_HALF_RADIUS    = 2600.0d * BODY_SIZE_SCALE * 0.5d; // 520
+    private static final double SUN_GM             =
+            GRAVITY_MASS_COEFF * SUN_HALF_RADIUS * SUN_HALF_RADIUS * SUN_HALF_RADIUS;
 
     public SolarSystemWorldDefinitionProvider(DoubleVector worldDimension, ProjectAssets assets) {
         super(worldDimension, assets);
@@ -20,33 +36,53 @@ public final class SolarSystemWorldDefinitionProvider extends AbstractWorldDefin
         this.addDecorator("galaxy_01", worldWidth * 0.22d, worldHeight * 0.28d, 1400.0d);
         this.addDecorator("stardust_01", worldWidth * 0.78d, worldHeight * 0.74d, 1200.0d);
 
+        // --- Sun: static GRAVITY body — the only gravity source in the scene ---
         DoubleVector sunPos = this.orbitPosition(0.0d, 0.0d);
         this.addGravityBody("sun_02", sunPos.x, sunPos.y, this.scaledBody(2600.0d));
 
-        this.addStaticOrbitalBody("planet_01", 5500.0d, 20.0d, this.scaledBody(320.0d));
-        this.addStaticOrbitalBody("planet_02", 8200.0d, 60.0d, this.scaledBody(500.0d));
+        // --- Orbiting planets: DYNAMIC bodies with pre-calculated circular-orbit velocities ---
+        //
+        // Size discipline: GM_eff = 0.08*(size/2)^3 * DYNAMIC_PLANET_MASS_MULT (currently 2.0).
+        // Sun GM = 11,248,640.  Outer planets spaced so neighbour perturbation < ~15% solar gravity.
+        //
+        //  Seed → scaled (BODY_SIZE_SCALE=0.40) → radius → GM  ×2 eff    orbital radius
+        //  planet_01:  160 →  64 → 32 →   2,621  →    5,243           r =  5,500
+        //  planet_02:  250 → 100 → 50 →  10,000  →   20,000           r =  8,200
+        //  planet_04:  310 → 124 → 62 →  19,047  →   38,094  Earth    r = 12,000
+        //  moon_05:    120 →  48 → 24 →   1,106   orbits Earth at +500 units offset
+        //  planet_03:  220 →  88 → 44 →   6,839  →   13,678  Mars     r = 16,000
+        //  planet_11:  400 → 160 → 80 →  40,960  →   81,920  Jupiter  r = 21,000
+        //  planet_15:  380 → 152 → 76 →  35,070  →   70,140  Saturn   r = 28,000
+        //  planet_18:  300 → 120 → 60 →  17,280  →   34,560  Uranus   r = 35,000
+        //  Neptune omitted: insufficient separation at world-scale orbital limits.
+        this.addDynamicOrbitalBody("planet_01",  5500.0d,  20.0d, this.scaledBody(160.0d));
+        this.addDynamicOrbitalBody("planet_02",  8200.0d,  60.0d, this.scaledBody(250.0d));
+        this.addDynamicOrbitalBody("planet_04", 12000.0d, 105.0d, this.scaledBody(310.0d));
 
+        // Moon: 500 units east of Earth, inside its Hill sphere (~993 units for Earth/Sun masses).
+        // Compound velocity = Earth's solar orbit + Moon's circular orbit around Earth.
         DoubleVector earthPos = this.orbitPosition(12000.0d, 105.0d);
-        this.addGravityBody("planet_04", earthPos.x, earthPos.y, this.scaledBody(560.0d));
+        this.addBodyOrbitingPlanet("moon_05",
+                12000.0d, 105.0d, this.scaledBody(310.0d),
+                500.0d, 0.0d,
+                this.scaledBody(120.0d));
 
-        DoubleVector moonPos = new DoubleVector(
-                earthPos.x + 1300.0d,
-                earthPos.y - 350.0d);
-        this.addGravityBody("moon_05", moonPos.x, moonPos.y, this.scaledBody(180.0d));
+        this.addDynamicOrbitalBody("planet_03", 16000.0d, 145.0d, this.scaledBody(220.0d));
+        this.addDynamicOrbitalBody("planet_11", 21000.0d, 210.0d, this.scaledBody(400.0d));
+        this.addDynamicOrbitalBody("planet_15", 28000.0d, 265.0d, this.scaledBody(380.0d));
+        this.addDynamicOrbitalBody("planet_18", 35000.0d, 315.0d, this.scaledBody(300.0d));
+        // Neptune omitted: insufficient orbital separation within world-scale limits.
 
-        this.addStaticOrbitalBody("planet_03", 16000.0d, 145.0d, this.scaledBody(420.0d));
-        this.addStaticOrbitalBody("planet_11", 22500.0d, 210.0d, this.scaledBody(1300.0d));
-        this.addStaticOrbitalBody("planet_15", 29000.0d, 265.0d, this.scaledBody(1100.0d));
-        this.addStaticOrbitalBody("planet_18", 34000.0d, 315.0d, this.scaledBody(820.0d));
-        this.addStaticOrbitalBody("planet_21", 37800.0d, 350.0d, this.scaledBody(760.0d));
-
+        // --- Player spaceship --- starts in near-circular solar orbit just outside Earth ---
+        double[] playerVel = this.orbitalVelocityAtPosition(earthPos.x + 1400.0d, earthPos.y);
         this.addSpaceship(
                 "spaceship_10",
                 earthPos.x + 1400.0d,
                 earthPos.y,
-                this.scaledPlayer(90.0d),
+                this.scaledPlayer(64.0d),
                 180.0d,
-                1.0d);
+                1.0d,
+                playerVel[0], playerVel[1]);
 
         this.addTrailEmitterCosmetic("stars_06", 100.0d, BodyType.DECORATOR, 100.0d);
 
@@ -56,9 +92,100 @@ public final class SolarSystemWorldDefinitionProvider extends AbstractWorldDefin
         this.addWeaponPresetMissileLauncherRandomAsset(engine.assets.ports.AssetType.MISSILE);
     }
 
-    private void addStaticOrbitalBody(String assetId, double radius, double angleDeg, double size) {
-        DoubleVector pos = this.orbitPosition(radius, angleDeg);
-        this.addGravityBody(assetId, pos.x, pos.y, size);
+    // *** PRIVATE ***
+
+    /**
+     * Places an orbital body at the default circular-orbit position for the
+     * given radius and angle, assigning the tangential velocity required for a
+     * stable circular orbit around the sun.
+     */
+    private void addDynamicOrbitalBody(String assetId, double orbitalRadius, double angleDeg, double size) {
+        DoubleVector pos = this.orbitPosition(orbitalRadius, angleDeg);
+        double[] vel     = this.circularOrbitVelocity(orbitalRadius, angleDeg);
+        this.addOrbitalBody(assetId, pos.x, pos.y, size, vel[0], vel[1], 0.0d);
+    }
+
+    /**
+     * Places an orbital body at an arbitrary world position, computing its
+     * orbital radius and angle from the sun centre and deriving the tangential
+     * velocity for a circular orbit.
+     */
+    private void addOrbitalBodyAtPos(String assetId, DoubleVector pos, double size) {
+        double centerX = worldWidth  * 0.5d;
+        double centerY = worldHeight * 0.5d;
+        double dx      = pos.x - centerX;
+        double dy      = pos.y - centerY;
+        double radius  = Math.sqrt(dx * dx + dy * dy);
+        double angleDeg = Math.toDegrees(Math.atan2(dy, dx));
+        double[] vel   = this.circularOrbitVelocity(radius, angleDeg);
+        this.addOrbitalBody(assetId, pos.x, pos.y, size, vel[0], vel[1], 0.0d);
+    }
+
+    /**
+     * Places a satellite that orbits a host planet.
+     * The host itself orbits the sun at the given orbital parameters.
+     * Satellite velocity = host solar-orbit velocity + tangential velocity around host (CCW).
+     *
+     * @param hostOrbitalRadius host distance from sun centre (world units)
+     * @param hostAngleDeg      host angle on solar orbit (degrees)
+     * @param hostScaledSize    full rendered size of host — used to derive host GM
+     * @param moonOffsetX       satellite offset from host, x-axis (world units)
+     * @param moonOffsetY       satellite offset from host, y-axis (world units)
+     * @param moonSize          rendered size of the satellite
+     */
+    private void addBodyOrbitingPlanet(
+            String assetId,
+            double hostOrbitalRadius, double hostAngleDeg, double hostScaledSize,
+            double moonOffsetX, double moonOffsetY,
+            double moonSize) {
+
+        DoubleVector hostPos = this.orbitPosition(hostOrbitalRadius, hostAngleDeg);
+        double[] hostVel     = this.circularOrbitVelocity(hostOrbitalRadius, hostAngleDeg);
+
+        double moonR     = Math.sqrt(moonOffsetX * moonOffsetX + moonOffsetY * moonOffsetY);
+        double hostHalfR = hostScaledSize * 0.5d;
+        double hostGM    = GRAVITY_MASS_COEFF * hostHalfR * hostHalfR * hostHalfR;
+        double vOrbit    = Math.sqrt(hostGM / Math.max(1.0d, moonR));
+
+        // CCW tangent derived from host-to-moon unit vector
+        double nx    = moonOffsetX / moonR;
+        double ny    = moonOffsetY / moonR;
+        double relVx = -ny * vOrbit;
+        double relVy =  nx * vOrbit;
+
+        this.addOrbitalBody(assetId,
+                hostPos.x + moonOffsetX, hostPos.y + moonOffsetY,
+                moonSize,
+                hostVel[0] + relVx, hostVel[1] + relVy,
+                0.0d);
+    }
+
+    /**
+     * Returns the [speedX, speedY] for a CCW circular solar orbit
+     * at the given world position (measured from world centre).
+     */
+    private double[] orbitalVelocityAtPosition(double worldPosX, double worldPosY) {
+        double cx = this.worldWidth  * 0.5d;
+        double cy = this.worldHeight * 0.5d;
+        double dx = worldPosX - cx;
+        double dy = worldPosY - cy;
+        double r  = Math.sqrt(dx * dx + dy * dy);
+        double angleDeg = Math.toDegrees(Math.atan2(dy, dx));
+        return this.circularOrbitVelocity(r, angleDeg);
+    }
+
+    /**
+     * Returns the [speedX, speedY] components for a counter-clockwise circular
+     * orbit at the given radius around the sun.
+     *
+     *   v  = sqrt(GM / r)
+     *   vx = -sin(θ) * v
+     *   vy =  cos(θ) * v
+     */
+    private double[] circularOrbitVelocity(double orbitalRadius, double angleDeg) {
+        double v   = Math.sqrt(SUN_GM / Math.max(1.0d, orbitalRadius));
+        double rad = Math.toRadians(angleDeg);
+        return new double[] { -Math.sin(rad) * v, Math.cos(rad) * v };
     }
 
     private double scaledBody(double size) {
@@ -70,12 +197,11 @@ public final class SolarSystemWorldDefinitionProvider extends AbstractWorldDefin
     }
 
     private DoubleVector orbitPosition(double radius, double angleDeg) {
-        double centerX = worldWidth * 0.5d;
+        double centerX = worldWidth  * 0.5d;
         double centerY = worldHeight * 0.5d;
         double radians = Math.toRadians(angleDeg);
-
         return new DoubleVector(
-                centerX + (Math.cos(radians) * radius),
-                centerY + (Math.sin(radians) * radius));
+                centerX + Math.cos(radians) * radius,
+                centerY + Math.sin(radians) * radius);
     }
 }

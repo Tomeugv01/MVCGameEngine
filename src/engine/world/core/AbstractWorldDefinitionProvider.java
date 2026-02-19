@@ -134,6 +134,31 @@ public abstract class AbstractWorldDefinitionProvider implements WorldDefinition
                 speedMin, speedMax,
                 angularSpeedMin, angularSpeedMax);
     }
+
+    /**
+     * Adds a named body to the dynamic asteroids list with explicit velocity
+     * components. Use this to place orbital bodies (planets, moons) whose
+     * initial speed has been pre-calculated so that they follow a stable orbit
+     * inside the physics engine.
+     *
+     * @param assetId      image asset identifier
+     * @param posX         initial X position in world coordinates
+     * @param posY         initial Y position in world coordinates
+     * @param size         sprite diameter
+     * @param speedX       initial horizontal velocity (world units / second)
+     * @param speedY       initial vertical velocity   (world units / second)
+     * @param angularSpeed initial angular velocity (degrees / second)
+     */
+    protected final void addOrbitalBody(
+            String assetId, double posX, double posY, double size,
+            double speedX, double speedY, double angularSpeed) {
+
+        requireNotNull(assetId, "assetId cannot be null");
+        this.assetsRegister.registerAssetId(assetId);
+        this.asteroids.add(new DefItemDTO(
+                assetId, size, randomAngle(), posX, posY, DEFAULT_DENSITY,
+                speedX, speedY, angularSpeed, NO_THRUST));
+    }
     // endregion
 
     // region Decorator adders (addDecorator ***)
@@ -287,6 +312,17 @@ public abstract class AbstractWorldDefinitionProvider implements WorldDefinition
         requireNotNull(assetId, "assetId cannot be null");
         this.assetsRegister.registerAssetId(assetId);
         this.spaceships.add(new DefItemDTO(assetId, size, angle, posX, posY, density));
+    }
+
+    protected final void addSpaceship(
+            String assetId, double posX, double posY,
+            double size, double angle, double density,
+            double speedX, double speedY) {
+
+        requireNotNull(assetId, "assetId cannot be null");
+        this.assetsRegister.registerAssetId(assetId);
+        this.spaceships.add(new DefItemDTO(assetId, size, angle, posX, posY, density,
+                speedX, speedY, 0.0d, 0.0d));
     }
 
     protected final void addSpaceship(

@@ -25,6 +25,12 @@ public class CentralGravityPhysicsEngine extends AbstractPhysicsEngine {
      private final GravitySourceProvider gravitySourceProvider;
      private volatile double massCoefficient;
      private volatile double minDistance;
+    /**
+     * When true, gravity is computed using {@code source.playerGravityMultiplier}
+     * instead of {@code source.massMultiplier}.  Set for PLAYER bodies so that
+     * planet gravity feels strong to the player without destabilising planet orbits.
+     */
+    private final boolean isPlayer;
 
     public CentralGravityPhysicsEngine(
             PhysicsValuesMDTO dto1,
@@ -33,7 +39,8 @@ public class CentralGravityPhysicsEngine extends AbstractPhysicsEngine {
             BodyProfiler profiler,
             GravitySourceProvider gravitySourceProvider,
             double massCoefficient,
-            double minDistance) {
+            double minDistance,
+            boolean isPlayer) {
 
         super(dto1, dto2, dto3);
 
@@ -41,6 +48,19 @@ public class CentralGravityPhysicsEngine extends AbstractPhysicsEngine {
         this.gravitySourceProvider = gravitySourceProvider;
         this.massCoefficient = Math.max(0.0d, massCoefficient);
         this.minDistance = Math.max(1.0d, minDistance);
+        this.isPlayer = isPlayer;
+    }
+
+    /** Back-compat overload — isPlayer defaults to false. */
+    public CentralGravityPhysicsEngine(
+            PhysicsValuesMDTO dto1,
+            PhysicsValuesMDTO dto2,
+            PhysicsValuesMDTO dto3,
+            BodyProfiler profiler,
+            GravitySourceProvider gravitySourceProvider,
+            double massCoefficient,
+            double minDistance) {
+        this(dto1, dto2, dto3, profiler, gravitySourceProvider, massCoefficient, minDistance, false);
     }
 
     @Override
@@ -223,7 +243,9 @@ public class CentralGravityPhysicsEngine extends AbstractPhysicsEngine {
                 }
 
                 double dist = Math.sqrt(distSq);
-                double sourceMass = this.massCoefficient * source.radius * source.radius * source.radius;
+                double mult = this.isPlayer ? source.playerGravityMultiplier : source.massMultiplier;
+                double sourceMass = this.massCoefficient * source.radius * source.radius * source.radius
+                        * mult;
                 if (sourceMass <= 0.0d) {
                     continue;
                 }

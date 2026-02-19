@@ -173,6 +173,24 @@ public class Model implements BodyEventProcessor, GravitySourceProvider {
     private static final boolean ENABLE_OBJECT_GRAVITY = true;
     private static final double GRAVITY_MASS_COEFFICIENT = 0.08d;
     private static final double GRAVITY_MIN_DISTANCE = 250.0d;
+    /**
+     * Mass multiplier applied to DYNAMIC planet bodies when exposed as gravity
+     * sources. Must stay at 1.0 for orbital stability.
+     *
+     * Why 1.0: the outer gas-giants have raw GM values already equal to 0.3-1 %
+     * of the sun's GM at their orbital radii; multiplying by 4 made them a
+     * 12-50 % perturbation on neighbouring planets, which destabilises orbits
+     * At 2.0, inter-planet perturbations reach ~10–17 % of solar gravity at
+     * closest approach — quasi-stable for typical session durations.
+     *
+     * PLANET_PLAYER_GRAVITY_MULT is used ONLY when computing gravity on the
+     * player (via CentralGravityPhysicsEngine.isPlayer = true).  It does not
+     * affect planet-planet interactions, so it can be raised freely without
+     * any impact on orbital stability.
+     * At 12.0 × Earth: Hill sphere ≈ 2260 units, surface acceleration ≈ 18 u/s².
+     */
+    private static final double DYNAMIC_PLANET_MASS_MULT   = 2.0d;
+    private static final double PLANET_PLAYER_GRAVITY_MULT = 12.0d;
     // endregion
 
     // region Fields
@@ -730,8 +748,10 @@ public class Model implements BodyEventProcessor, GravitySourceProvider {
     // region GravitySourceProvider
     @Override
     public List<GravitySourceDTO> getGravitySources() {
-        ArrayList<GravitySourceDTO> sources = new ArrayList<>(this.gravityBodies.size());
+        int capacity = this.gravityBodies.size() + this.dynamicBodies.size();
+        ArrayList<GravitySourceDTO> sources = new ArrayList<>(capacity);
 
+        // Static gravity sources (e.g. sun) — both multipliers = 1.0, vel = 0
         this.gravityBodies.forEach((entityId, body) -> {
             if (body == null || body.getBodyState() == BodyState.DEAD) {
                 return;
@@ -743,7 +763,30 @@ public class Model implements BodyEventProcessor, GravitySourceProvider {
             }
 
             double radius = Math.max(1.0d, phyValues.size * 0.5d);
-            sources.add(new GravitySourceDTO(entityId, phyValues.posX, phyValues.posY, radius));
+            sources.add(new GravitySourceDTO(entityId, phyValues.posX, phyValues.posY, radius,
+                    1.0d, 1.0d, 0.0d, 0.0d));
+        });
+
+        // Dynamic planetary bodies — massMultiplier (planet-planet) stays low for
+        // orbital stability; playerGravityMultiplier is high so the player feels
+        // strong gravity near a planet.  velocities passed for planet-relative trace.
+        this.dynamicBodies.forEach((entityId, body) -> {
+            if (body == null || body.getBodyState() == BodyState.DEAD) {
+                return;
+            }
+            if (body.getBodyType() != BodyType.DYNAMIC) {
+                return; // skip PLAYER and PROJECTILE bodies
+            }
+
+            PhysicsValuesMDTO phyValues = body.getPhysicsValues();
+            if (phyValues == null) {
+                return;
+            }
+
+            double radius = Math.max(1.0d, phyValues.size * 0.5d);
+            sources.add(new GravitySourceDTO(entityId, phyValues.posX, phyValues.posY, radius,
+                    DYNAMIC_PLANET_MASS_MULT, PLANET_PLAYER_GRAVITY_MULT,
+                    phyValues.speedX, phyValues.speedY));
         });
 
         return sources;
@@ -1077,6 +1120,7 @@ public class Model implements BodyEventProcessor, GravitySourceProvider {
 
         PhysicsValuesMDTO otherPhyValues = otherBody.getPhysicsValues();
 
+        // --- Collision normal (from other body centre toward this body) ---
         double normalX = newPhyValues.posX - otherPhyValues.posX;
         double normalY = newPhyValues.posY - otherPhyValues.posY;
 
@@ -1090,15 +1134,30 @@ public class Model implements BodyEventProcessor, GravitySourceProvider {
         normalX /= normalLength;
         normalY /= normalLength;
 
-        double oldSpeedX = newPhyValues.speedX;
-        double oldSpeedY = newPhyValues.speedY;
-        double dot = oldSpeedX * normalX + oldSpeedY * normalY;
+        // --- Mass-based elastic collision (1-D impulse on collision axis) ---
+        // Mass is proportional to radius^3 (volume), matching the gravity model.
+        // This ensures massive planets barely deflect on player contact while
+        // the player gets kicked away at the correct impulse speed.
+        double r1 = newPhyValues.size * 0.5d;
+        double r2 = otherPhyValues.size * 0.5d;
+        double m1 = r1 * r1 * r1;  // proportional mass of this body
+        double m2 = r2 * r2 * r2;  // proportional mass of other body
+        double mTotal = m1 + m2;
 
-        double reboundSpeedX = oldSpeedX - (2.0d * dot * normalX);
-        double reboundSpeedY = oldSpeedY - (2.0d * dot * normalY);
+        double v1n = newPhyValues.speedX * normalX + newPhyValues.speedY * normalY;
+        double v2n = otherPhyValues.speedX * normalX + otherPhyValues.speedY * normalY;
 
-        double bodyRadius = newPhyValues.size * 0.5d * 0.9d;
-        double otherRadius = otherPhyValues.size * 0.5d * 0.9d;
+        // Post-collision normal-component velocity (elastic, 1-D)
+        double v1nAfter = ((m1 - m2) * v1n + 2.0d * m2 * v2n) / mTotal;
+
+        // Update only the normal component, preserve tangential component
+        double dv1n = v1nAfter - v1n;
+        double reboundSpeedX = newPhyValues.speedX + dv1n * normalX;
+        double reboundSpeedY = newPhyValues.speedY + dv1n * normalY;
+
+        // --- Separation correction (prevent overlap) ---
+        double bodyRadius = r1 * 0.9d;
+        double otherRadius = r2 * 0.9d;
         double separation = bodyRadius + otherRadius + 0.5d;
 
         double correctedPosX = otherPhyValues.posX + normalX * separation;

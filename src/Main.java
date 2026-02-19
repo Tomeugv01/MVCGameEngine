@@ -27,7 +27,7 @@ public class Main {
 		// => *** Keep viewDimension smaller than actual screen size ***
 		// => *** or... no set viewDimension                         ***
 		// => **********************************************************
-		DoubleVector viewDimension = new DoubleVector(1600, 900);
+		DoubleVector viewDimension = new DoubleVector(1300, 600);
 		DoubleVector worldDimension = new DoubleVector(80000, 80000);
 		// endregion
 		
@@ -39,7 +39,8 @@ public class Main {
 		// ActionsGenerator gameRules = new gamerules.LimitRebound();
 		// ActionsGenerator gameRules = new gamerules.ReboundAndCollision();
 		// ActionsGenerator gameRules = new gamerules.InLimitsGoToCenter();
-		ActionsGenerator gameRules = new gamerules.SolidEarthCenterRule();
+		// ActionsGenerator gameRules = new gamerules.SolidEarthCenterRule();
+		ActionsGenerator gameRules = new gamerules.OrbitalSolarSystemRule();
 
 		// *** WORLD DEFINITION PROVIDER ***
 		// WorldDefinitionProvider worldProv = new gameworld.RandomWorldDefinitionProvider(
@@ -65,15 +66,18 @@ public class Main {
 		// endregion
 
 		// region Level generator (Level***)
-		new gamelevel.LevelBasic(controller, worldDef);
+		new gamelevel.LevelSolarSystem(controller, worldDef);
 		// endregion
 
 		// region AI generator (AI***)
-		boolean asteroidSpawnerEnabled = !(gameRules instanceof gamerules.SolidEarthCenterRule);
+		// Asteroid spawner is disabled for orbital solar system — random bodies
+		// would disturb the carefully calibrated planetary orbits.
+		boolean asteroidSpawnerEnabled = !(gameRules instanceof gamerules.OrbitalSolarSystemRule)
+				&& !(gameRules instanceof gamerules.SolidEarthCenterRule);
 		if (asteroidSpawnerEnabled) {
 			new gameai.AIBasicSpawner(controller, worldDef, maxAsteroidCreationDelay).activate();
 		} else {
-			System.out.println("Main: Asteroid spawner disabled for SolidEarthCenterRule");
+			System.out.println("Main: Asteroid spawner disabled for " + gameRules.getClass().getSimpleName());
 		}
 		// endregion
 	}

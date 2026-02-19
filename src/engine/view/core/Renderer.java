@@ -153,8 +153,19 @@ public class Renderer extends Canvas implements Runnable {
     private static final int ORBIT_CLOSE_MIN_STEPS = 320;
     private static final double ORBIT_CLOSE_DISTANCE_MULTIPLIER = 2.0d;
     private static final double ORBIT_CLOSE_DIRECTION_DOT_MIN = 0.97d;
-    private static final int PLANET_TRACE_STEPS = 480;
-    private static final double PLANET_TRACE_STEP_SECONDS = 0.05d;
+    private static final int    PLANET_TRACE_TARGET_STEPS = 480;       // integration steps per estimated orbit
+    private static final double PLANET_TRACE_MIN_STEP_SECONDS = 0.04d; // precision floor for inner planets
+    private static final int    PLANET_TRACE_MAX_STEPS = 1440;         // hard safety cap (~3x target)
+    /** Minimum speed (world units/s) a body must have to be given an orbit trace.
+     *  Filters out near-stationary bodies like the sun that would otherwise
+     *  show a phantom drift caused by n-body numerical integration. */
+    private static final double PLANET_TRACE_MIN_SPEED = 0.5d;
+    // Hill-sphere rings drawn around every planet
+    private static final Color  HILL_SPHERE_RING_COLOR  = new Color(120, 200, 255, 45);
+    // Player trajectory when inside a planet's Hill sphere (green = planet-relative orbit)
+    private static final Color  PLANET_RELATIVE_TRACE_COLOR = new Color(100, 255, 150, 185);
+    // Player trajectory in solar inertial frame (blue)
+    private static final Color  INERTIAL_TRACE_COLOR = new Color(80, 220, 255, 180);
 
     // Logs
     private static final boolean DIAGNOSTIC_LOGS_ENABLED = true;
@@ -509,13 +520,59 @@ public class Renderer extends Canvas implements Runnable {
         double speedY = physics.speedY;
         double angularSpeed = physics.angularSpeed;
         double angularAcc = physics.angularAcc;
-        double startX = x;
-        double startY = y;
-        double startSpeedX = speedX;
-        double startSpeedY = speedY;
+
+        // --- Detect if the player is inside any planet's Hill sphere ---
+        // If so, switch to a planet-relative trajectory trace that shows the
+        // actual orbit shape around that planet instead of a confusing inertial spiral.
+        GravitySourceDTO capturePlanet = null;
+        double plX = 0.0d, plY = 0.0d, plVX = 0.0d, plVY = 0.0d;
+        if (gravitySources != null) {
+            GravitySourceDTO sunSrc = null;
+            for (GravitySourceDTO src : gravitySources) {
+                if (src != null && Math.hypot(src.velX, src.velY) < PLANET_TRACE_MIN_SPEED) {
+                    sunSrc = src;
+                    break;
+                }
+            }
+            if (sunSrc != null) {
+                double mSun = TRAJECTORY_GRAVITY_MASS_COEFFICIENT
+                        * sunSrc.radius * sunSrc.radius * sunSrc.radius;
+                double bestMass = 0.0d;
+                for (GravitySourceDTO src : gravitySources) {
+                    if (src == null || src == sunSrc
+                            || Math.hypot(src.velX, src.velY) < PLANET_TRACE_MIN_SPEED) continue;
+                    double dsx = src.posX - sunSrc.posX;
+                    double dsy = src.posY - sunSrc.posY;
+                    double aPlanet = Math.sqrt(dsx * dsx + dsy * dsy);
+                    double mPlanet = TRAJECTORY_GRAVITY_MASS_COEFFICIENT
+                            * src.radius * src.radius * src.radius * src.playerGravityMultiplier;
+                    double rH = aPlanet * Math.pow(mPlanet / (3.0d * mSun), 1.0d / 3.0d);
+                    double dpx = src.posX - x;
+                    double dpy = src.posY - y;
+                    if (Math.sqrt(dpx * dpx + dpy * dpy) < rH && mPlanet > bestMass) {
+                        bestMass = mPlanet;
+                        capturePlanet = src;
+                        plX = src.posX;  plY = src.posY;
+                        plVX = src.velX; plVY = src.velY;
+                    }
+                }
+            }
+        }
+        final boolean planetRelative = (capturePlanet != null);
+        // In planet-relative mode the planet is anchored at its current world
+        // position; player positions are drawn offset by (playerWorldPos - planetWorldPos).
+        final double anchorX = plX;
+        final double anchorY = plY;
+
+        // Relative start position / speed for orbit-close detection
+        double startX      = planetRelative ? (x      - plX + anchorX) : x;
+        double startY      = planetRelative ? (y      - plY + anchorY) : y;
+        double startSpeedX = planetRelative ? (speedX - plVX)          : speedX;
+        double startSpeedY = planetRelative ? (speedY - plVY)          : speedY;
         double startSpeedMag = Math.hypot(startSpeedX, startSpeedY);
+
         double orbitCloseDistance = Math.max(physics.size * ORBIT_CLOSE_DISTANCE_MULTIPLIER, 25.0d);
-        double movedAwayDistance = Math.max(physics.size * 8.0d, orbitCloseDistance * 4.0d);
+        double movedAwayDistance  = Math.max(physics.size * 8.0d, orbitCloseDistance * 4.0d);
         boolean movedAwayFromStart = false;
 
         Stroke oldStroke = g.getStroke();
@@ -523,9 +580,9 @@ public class Renderer extends Canvas implements Runnable {
 
         float lineWidth = (float) (1.8d / Math.max(this.zoomFactor, 0.001d));
         g.setStroke(new BasicStroke(lineWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        g.setColor(new Color(80, 220, 255, 180));
+        g.setColor(planetRelative ? PLANET_RELATIVE_TRACE_COLOR : INERTIAL_TRACE_COLOR);
 
-        double worldWidth = this.view.getWorldDimension().x;
+        double worldWidth  = this.view.getWorldDimension().x;
         double worldHeight = this.view.getWorldDimension().y;
 
         for (int i = 0; i < MAX_TRAJECTORY_STEPS; i++) {
@@ -533,34 +590,25 @@ public class Renderer extends Canvas implements Runnable {
             double thrustAccX = thrust == 0.0d ? 0.0d : Math.cos(angleRad) * thrust;
             double thrustAccY = thrust == 0.0d ? 0.0d : Math.sin(angleRad) * thrust;
 
+            // -- Player gravity (uses playerGravityMultiplier, matching physics engine) --
             double gravityAccX = 0.0d;
             double gravityAccY = 0.0d;
-
-            if (gravitySources != null && !gravitySources.isEmpty()) {
+            if (gravitySources != null) {
                 for (GravitySourceDTO source : gravitySources) {
-                    if (source == null || source.radius <= 0.0d) {
-                        continue;
-                    }
-
+                    if (source == null || source.radius <= 0.0d) continue;
                     double dx = source.posX - x;
                     double dy = source.posY - y;
                     double distSq = dx * dx + dy * dy;
-
-                    double softDistance = Math.max(TRAJECTORY_GRAVITY_MIN_DISTANCE, source.radius);
-                    double softDistanceSq = softDistance * softDistance;
-                    if (distSq < softDistanceSq) {
-                        distSq = softDistanceSq;
-                    }
-
+                    double soft = Math.max(TRAJECTORY_GRAVITY_MIN_DISTANCE, source.radius);
+                    if (distSq < soft * soft) distSq = soft * soft;
                     double dist = Math.sqrt(distSq);
-                    double sourceMass = TRAJECTORY_GRAVITY_MASS_COEFFICIENT * source.radius * source.radius * source.radius;
-                    if (sourceMass <= 0.0d) {
-                        continue;
-                    }
-
-                    double accMag = sourceMass / distSq;
-                    gravityAccX += accMag * (dx / dist);
-                    gravityAccY += accMag * (dy / dist);
+                    double sourceMass = TRAJECTORY_GRAVITY_MASS_COEFFICIENT
+                            * source.radius * source.radius * source.radius
+                            * source.playerGravityMultiplier;
+                    if (sourceMass <= 0.0d) continue;
+                    double am = sourceMass / distSq;
+                    gravityAccX += am * (dx / dist);
+                    gravityAccY += am * (dy / dist);
                 }
             }
 
@@ -571,9 +619,36 @@ public class Renderer extends Canvas implements Runnable {
             double newSpeedY = speedY + accY * TRAJECTORY_STEP_SECONDS;
             double avgSpeedX = (speedX + newSpeedX) * 0.5d;
             double avgSpeedY = (speedY + newSpeedY) * 0.5d;
-
             double nextX = x + avgSpeedX * TRAJECTORY_STEP_SECONDS;
             double nextY = y + avgSpeedY * TRAJECTORY_STEP_SECONDS;
+
+            // -- Planet motion (integrate from gravity sources using massMultiplier) --
+            double nextPX = plX, nextPY = plY, nextPVX = plVX, nextPVY = plVY;
+            if (planetRelative && gravitySources != null) {
+                double pAccX = 0.0d, pAccY = 0.0d;
+                for (GravitySourceDTO src : gravitySources) {
+                    if (src == null || src == capturePlanet || src.radius <= 0.0d) continue;
+                    double dx = src.posX - plX;
+                    double dy = src.posY - plY;
+                    double dSq = Math.max(dx * dx + dy * dy, src.radius * src.radius);
+                    double d   = Math.sqrt(dSq);
+                    double m   = TRAJECTORY_GRAVITY_MASS_COEFFICIENT
+                            * src.radius * src.radius * src.radius * src.massMultiplier;
+                    double am  = m / dSq;
+                    pAccX += am * (dx / d);
+                    pAccY += am * (dy / d);
+                }
+                nextPVX = plVX + pAccX * TRAJECTORY_STEP_SECONDS;
+                nextPVY = plVY + pAccY * TRAJECTORY_STEP_SECONDS;
+                nextPX  = plX  + ((plVX + nextPVX) * 0.5d) * TRAJECTORY_STEP_SECONDS;
+                nextPY  = plY  + ((plVY + nextPVY) * 0.5d) * TRAJECTORY_STEP_SECONDS;
+            }
+
+            // -- Drawing coordinates --
+            double drawX0 = planetRelative ? (x      - plX    + anchorX) : x;
+            double drawY0 = planetRelative ? (y      - plY    + anchorY) : y;
+            double drawX1 = planetRelative ? (nextX  - nextPX + anchorX) : nextX;
+            double drawY1 = planetRelative ? (nextY  - nextPY + anchorY) : nextY;
 
             double newAngularSpeed = angularSpeed + angularAcc * TRAJECTORY_STEP_SECONDS;
             double newAngle = angle
@@ -581,8 +656,8 @@ public class Renderer extends Canvas implements Runnable {
                     + 0.5d * newAngularSpeed * TRAJECTORY_STEP_SECONDS * TRAJECTORY_STEP_SECONDS;
             newAngle = ((newAngle % 360.0d) + 360.0d) % 360.0d;
 
-            g.drawLine((int) Math.round(x), (int) Math.round(y),
-                    (int) Math.round(nextX), (int) Math.round(nextY));
+            g.drawLine((int) Math.round(drawX0), (int) Math.round(drawY0),
+                       (int) Math.round(drawX1), (int) Math.round(drawY1));
 
             if (nextX < 0 || nextX > worldWidth || nextY < 0 || nextY > worldHeight) {
                 break;
@@ -594,31 +669,96 @@ public class Renderer extends Canvas implements Runnable {
             angle = newAngle;
             x = nextX;
             y = nextY;
+            if (planetRelative) {
+                plX = nextPX;  plY = nextPY;
+                plVX = nextPVX; plVY = nextPVY;
+            }
 
-            double distFromStart = Math.hypot(x - startX, y - startY);
+            double relX = planetRelative ? (x - plX + anchorX) : x;
+            double relY = planetRelative ? (y - plY + anchorY) : y;
+            double distFromStart = Math.hypot(relX - startX, relY - startY);
             if (!movedAwayFromStart && distFromStart >= movedAwayDistance) {
                 movedAwayFromStart = true;
             }
+            if (!movedAwayFromStart || i < ORBIT_CLOSE_MIN_STEPS) continue;
+            if (distFromStart > orbitCloseDistance) continue;
 
-            if (!movedAwayFromStart || i < ORBIT_CLOSE_MIN_STEPS) {
-                continue;
-            }
-
-            if (distFromStart > orbitCloseDistance) {
-                continue;
-            }
-
-            double speedMag = Math.hypot(speedX, speedY);
+            double relVX = planetRelative ? (speedX - plVX) : speedX;
+            double relVY = planetRelative ? (speedY - plVY) : speedY;
+            double speedMag = Math.hypot(relVX, relVY);
             if (startSpeedMag <= 0.0001d || speedMag <= 0.0001d) {
                 break;
             }
 
-            double directionDot = ((startSpeedX * speedX) + (startSpeedY * speedY))
+            double relVX2 = planetRelative ? (speedX - plVX) : speedX;
+            double relVY2 = planetRelative ? (speedY - plVY) : speedY;
+            double directionDot = ((startSpeedX * relVX2) + (startSpeedY * relVY2))
                     / (startSpeedMag * speedMag);
 
             if (directionDot >= ORBIT_CLOSE_DIRECTION_DOT_MIN) {
                 break;
             }
+        }
+
+        g.setStroke(oldStroke);
+        g.setColor(oldColor);
+    }
+
+    /**
+     * Draws a faint ring around each orbiting planet marking the boundary of
+     * its Hill sphere — the region where the planet's gravity dominates over
+     * solar tidal forces and capture orbits are possible.
+     *
+     * r_H = a_planet * (m_planet_eff / (3 * m_sun))^(1/3)
+     * where m_planet_eff uses playerGravityMultiplier (matches what the player feels).
+     */
+    private void drawHillSpheres(Graphics2D g) {
+        if (!this.planetTracesEnabled) {
+            return;
+        }
+        List<GravitySourceDTO> gravitySources = this.view.getGravitySources();
+        if (gravitySources == null || gravitySources.isEmpty()) {
+            return;
+        }
+
+        // Identify the sun: stationary gravity source (velX ≈ velY ≈ 0)
+        GravitySourceDTO sunSrc = null;
+        for (GravitySourceDTO src : gravitySources) {
+            if (src == null) continue;
+            if (Math.hypot(src.velX, src.velY) < PLANET_TRACE_MIN_SPEED) {
+                sunSrc = src;
+                break;
+            }
+        }
+        if (sunSrc == null) return;
+
+        double mSun = TRAJECTORY_GRAVITY_MASS_COEFFICIENT
+                * sunSrc.radius * sunSrc.radius * sunSrc.radius;
+
+        Stroke oldStroke = g.getStroke();
+        Color  oldColor  = g.getColor();
+
+        float lw = (float) (0.8d / Math.max(this.zoomFactor, 0.001d));
+        g.setStroke(new BasicStroke(lw, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.setColor(HILL_SPHERE_RING_COLOR);
+
+        for (GravitySourceDTO src : gravitySources) {
+            if (src == null || src == sunSrc
+                    || Math.hypot(src.velX, src.velY) < PLANET_TRACE_MIN_SPEED) {
+                continue;
+            }
+            double dsx = src.posX - sunSrc.posX;
+            double dsy = src.posY - sunSrc.posY;
+            double aPlanet = Math.sqrt(dsx * dsx + dsy * dsy);
+            double mPlanet = TRAJECTORY_GRAVITY_MASS_COEFFICIENT
+                    * src.radius * src.radius * src.radius * src.playerGravityMultiplier;
+            double rH = aPlanet * Math.pow(mPlanet / (3.0d * mSun), 1.0d / 3.0d);
+            if (rH < 1.0d) continue;
+
+            int cx = (int) Math.round(src.posX - rH);
+            int cy = (int) Math.round(src.posY - rH);
+            int d  = (int) Math.round(rH * 2.0d);
+            g.drawOval(cx, cy, d, d);
         }
 
         g.setStroke(oldStroke);
@@ -637,6 +777,7 @@ public class Renderer extends Canvas implements Runnable {
 
         Stroke oldStroke = g.getStroke();
         Color oldColor = g.getColor();
+        DoubleVector worldDim = this.view.getWorldDimension();
 
         float lineWidth = (float) (1.25d / Math.max(this.zoomFactor, 0.001d));
         g.setStroke(new BasicStroke(lineWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
@@ -653,17 +794,62 @@ public class Renderer extends Canvas implements Runnable {
             }
 
             PhysicsValuesMDTO phy = sourceBodyData.getPhysicsValues();
+
+            // Skip non-moving bodies (e.g. the sun) — they have no meaningful orbit to trace
+            double speed = Math.hypot(phy.speedX, phy.speedY);
+            if (speed < PLANET_TRACE_MIN_SPEED) {
+                continue;
+            }
+
             double x = phy.posX;
             double y = phy.posY;
             double speedX = phy.speedX;
             double speedY = phy.speedY;
 
-            for (int i = 0; i < PLANET_TRACE_STEPS; i++) {
+            // --- Adaptive step: target ~PLANET_TRACE_TARGET_STEPS per full orbit ---
+            // Find the dominant attractor (highest mass) to estimate orbital period.
+            double dominantMass = 0.0d;
+            double dominantX    = worldDim.x * 0.5d;
+            double dominantY    = worldDim.y * 0.5d;
+            for (GravitySourceDTO a : gravitySources) {
+                if (a == null || a.bodyId.equals(source.bodyId)) {
+                    continue;
+                }
+                double m = TRAJECTORY_GRAVITY_MASS_COEFFICIENT
+                        * a.radius * a.radius * a.radius * a.massMultiplier;
+                if (m > dominantMass) {
+                    dominantMass = m;
+                    dominantX = a.posX;
+                    dominantY = a.posY;
+                }
+            }
+            double orbitRadius = Math.hypot(x - dominantX, y - dominantY);
+            double estimatedPeriod = (speed > 0.001d)
+                    ? (Math.PI * 2.0d * orbitRadius / speed)
+                    : 2000.0d;
+            double dt = Math.max(PLANET_TRACE_MIN_STEP_SECONDS,
+                    estimatedPeriod / PLANET_TRACE_TARGET_STEPS);
+            int maxSteps = (int) Math.min(PLANET_TRACE_MAX_STEPS,
+                    Math.ceil(estimatedPeriod / dt) * 2.0d);
+
+            // --- Orbit-close tracking (same logic as drawTrajectory) ---
+            double startX       = x;
+            double startY       = y;
+            double startSpeedX  = speedX;
+            double startSpeedY  = speedY;
+            double startSpeedMag = speed;
+            double orbitCloseDistance = Math.max(phy.size * ORBIT_CLOSE_DISTANCE_MULTIPLIER, 50.0d);
+            double movedAwayDistance  = Math.max(phy.size * 6.0d, orbitCloseDistance * 3.0d);
+            boolean movedAway = false;
+            int earlyCloseGuard = (int) (PLANET_TRACE_TARGET_STEPS * 0.25d);
+
+            for (int i = 0; i < maxSteps; i++) {
                 double gravityAccX = 0.0d;
                 double gravityAccY = 0.0d;
 
                 for (GravitySourceDTO attractor : gravitySources) {
-                    if (attractor == null || attractor.radius <= 0.0d || source.bodyId.equals(attractor.bodyId)) {
+                    if (attractor == null || attractor.radius <= 0.0d
+                            || source.bodyId.equals(attractor.bodyId)) {
                         continue;
                     }
 
@@ -679,7 +865,8 @@ public class Renderer extends Canvas implements Runnable {
 
                     double dist = Math.sqrt(distSq);
                     double sourceMass = TRAJECTORY_GRAVITY_MASS_COEFFICIENT
-                            * attractor.radius * attractor.radius * attractor.radius;
+                            * attractor.radius * attractor.radius * attractor.radius
+                            * attractor.massMultiplier;
                     if (sourceMass <= 0.0d) {
                         continue;
                     }
@@ -689,27 +876,48 @@ public class Renderer extends Canvas implements Runnable {
                     gravityAccY += accMag * (dy / dist);
                 }
 
-                double nextSpeedX = speedX + gravityAccX * PLANET_TRACE_STEP_SECONDS;
-                double nextSpeedY = speedY + gravityAccY * PLANET_TRACE_STEP_SECONDS;
-                double avgSpeedX = (speedX + nextSpeedX) * 0.5d;
-                double avgSpeedY = (speedY + nextSpeedY) * 0.5d;
+                double nextSpeedX = speedX + gravityAccX * dt;
+                double nextSpeedY = speedY + gravityAccY * dt;
+                double avgSpeedX  = (speedX + nextSpeedX) * 0.5d;
+                double avgSpeedY  = (speedY + nextSpeedY) * 0.5d;
 
-                double nextX = x + avgSpeedX * PLANET_TRACE_STEP_SECONDS;
-                double nextY = y + avgSpeedY * PLANET_TRACE_STEP_SECONDS;
+                double nextX = x + avgSpeedX * dt;
+                double nextY = y + avgSpeedY * dt;
 
                 g.drawLine(
-                        (int) Math.round(x),
-                        (int) Math.round(y),
-                        (int) Math.round(nextX),
-                        (int) Math.round(nextY));
+                        (int) Math.round(x), (int) Math.round(y),
+                        (int) Math.round(nextX), (int) Math.round(nextY));
+
+                if (nextX < 0.0d || nextX > worldDim.x || nextY < 0.0d || nextY > worldDim.y) {
+                    break;
+                }
 
                 x = nextX;
                 y = nextY;
                 speedX = nextSpeedX;
                 speedY = nextSpeedY;
 
-                DoubleVector worldDim = this.view.getWorldDimension();
-                if (x < 0.0d || y < 0.0d || x > worldDim.x || y > worldDim.y) {
+                double distFromStart = Math.hypot(x - startX, y - startY);
+                if (!movedAway && distFromStart >= movedAwayDistance) {
+                    movedAway = true;
+                }
+
+                if (!movedAway || i < earlyCloseGuard) {
+                    continue;
+                }
+
+                if (distFromStart > orbitCloseDistance) {
+                    continue;
+                }
+
+                double currentSpeedMag = Math.hypot(speedX, speedY);
+                if (startSpeedMag <= 0.0001d || currentSpeedMag <= 0.0001d) {
+                    break;
+                }
+
+                double directionDot = (startSpeedX * speedX + startSpeedY * speedY)
+                        / (startSpeedMag * currentSpeedMag);
+                if (directionDot >= ORBIT_CLOSE_DIRECTION_DOT_MIN) {
                     break;
                 }
             }
@@ -750,6 +958,7 @@ public class Renderer extends Canvas implements Runnable {
                 this.drawStatics(gg);
                 this.drawDynamics(gg, visibleIds);
                 this.drawPlanetTraces(gg);
+                this.drawHillSpheres(gg);
                 this.drawTrajectory(gg);
 
                 gg.setTransform(defaultTransform);

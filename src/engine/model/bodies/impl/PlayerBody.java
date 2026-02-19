@@ -41,8 +41,8 @@ public class PlayerBody extends DynamicBody {
                 emitterId,
                 profiler);
 
-        this.setMaxThrustForce(1400);
-        this.setMaxAngularAcceleration(1000);
+        this.setMaxThrustForce(80);          // enough for orbit-insertion burns (~21 u/s delta-v in <0.3 s)
+        this.setMaxAngularAcceleration(500);
         this.setAngularSpeed(30);
     }
 
