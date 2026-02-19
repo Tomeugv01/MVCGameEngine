@@ -27,21 +27,24 @@ public class Main {
 		// => *** Keep viewDimension smaller than actual screen size ***
 		// => *** or... no set viewDimension                         ***
 		// => **********************************************************
-		DoubleVector viewDimension = new DoubleVector(720, 720);
-		DoubleVector worldDimension = new DoubleVector(40000, 40000);
+		DoubleVector viewDimension = new DoubleVector(1600, 900);
+		DoubleVector worldDimension = new DoubleVector(80000, 80000);
 		// endregion
 		
-		int maxBodies = 1000;
-		int maxAsteroidCreationDelay = 3; // Used by AIBasicSpawner
+		 int maxBodies = 1000;
+		 int maxAsteroidCreationDelay = 0; // Used by AIBasicSpawner
 
 		ProjectAssets projectAssets = new ProjectAssets();
 
 		// ActionsGenerator gameRules = new gamerules.LimitRebound();
 		// ActionsGenerator gameRules = new gamerules.ReboundAndCollision();
-		ActionsGenerator gameRules = new gamerules.InLimitsGoToCenter();
+		// ActionsGenerator gameRules = new gamerules.InLimitsGoToCenter();
+		ActionsGenerator gameRules = new gamerules.SolidEarthCenterRule();
 
 		// *** WORLD DEFINITION PROVIDER ***
-		WorldDefinitionProvider worldProv = new gameworld.RandomWorldDefinitionProvider(
+		// WorldDefinitionProvider worldProv = new gameworld.RandomWorldDefinitionProvider(
+		// 		worldDimension, projectAssets);
+		WorldDefinitionProvider worldProv = new gameworld.SolarSystemWorldDefinitionProvider(
 				worldDimension, projectAssets);
 
 		// *** CORE ENGINE ***
@@ -66,7 +69,12 @@ public class Main {
 		// endregion
 
 		// region AI generator (AI***)
-		new gameai.AIBasicSpawner(controller, worldDef, maxAsteroidCreationDelay).activate();
+		boolean asteroidSpawnerEnabled = !(gameRules instanceof gamerules.SolidEarthCenterRule);
+		if (asteroidSpawnerEnabled) {
+			new gameai.AIBasicSpawner(controller, worldDef, maxAsteroidCreationDelay).activate();
+		} else {
+			System.out.println("Main: Asteroid spawner disabled for SolidEarthCenterRule");
+		}
 		// endregion
 	}
 }

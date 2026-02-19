@@ -212,6 +212,20 @@ public abstract class AbstractWorldDefinitionProvider implements WorldDefinition
     }
 
     protected final void addGravityBody(
+            String assetId, double posX, double posY,
+            double size, double angle, double density,
+            double speedX, double speedY,
+            double angularSpeed, double thrust) {
+
+        requireNotNull(assetId, "assetId cannot be null");
+        this.assetsRegister.registerAssetId(assetId);
+        this.gravityBodies.add(new DefItemDTO(
+                assetId, size, angle, posX, posY, density,
+                speedX, speedY,
+                angularSpeed, thrust));
+    }
+
+    protected final void addGravityBody(
             String assetId, double posX, double posY, double size) {
 
         addGravityBody(

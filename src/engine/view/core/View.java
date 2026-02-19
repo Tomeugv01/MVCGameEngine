@@ -5,20 +5,31 @@ import java.awt.GridBagConstraints;
 import java.awt.GridBagLayout;
 import java.awt.event.KeyEvent;
 import java.awt.event.KeyListener;
+import java.awt.event.MouseEvent;
+import java.awt.event.MouseListener;
+import java.awt.event.MouseMotionListener;
+import java.awt.event.MouseWheelEvent;
+import java.awt.event.MouseWheelListener;
 import java.awt.event.WindowEvent;
 import java.awt.event.WindowFocusListener;
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import javax.swing.AbstractAction;
+import javax.swing.JComponent;
 import javax.swing.JFrame;
+import javax.swing.KeyStroke;
 import javax.swing.SwingUtilities;
 
 import engine.assets.core.AssetCatalog;
 import engine.assets.ports.AssetType;
 import engine.controller.impl.Controller;
+import engine.model.bodies.ports.BodyData;
+import engine.model.physics.ports.GravitySourceDTO;
 import engine.controller.ports.EngineState;
 import engine.utils.helpers.DoubleVector;
 import engine.utils.images.Images;
@@ -110,12 +121,12 @@ import engine.view.renderables.ports.SpatialGridStatisticsRenderDTO;
  * - Keep rendering independent and real-time (active rendering).
  * - Translate user input into controller commands cleanly and predictably.
  */
-public class View extends JFrame implements KeyListener, WindowFocusListener {
+public class View extends JFrame
+    implements KeyListener, WindowFocusListener, MouseWheelListener, MouseListener, MouseMotionListener {
 
     // region Fields
     private BufferedImage background;
     private Controller controller;
-    private final ControlPanel controlPanel;
     private final Images images;
     private String localPlayerId;
     private final Renderer renderer;
@@ -132,7 +143,6 @@ public class View extends JFrame implements KeyListener, WindowFocusListener {
     // region Constructors
     public View() {
         this.images = new Images("");
-        this.controlPanel = new ControlPanel(this);
         this.renderer = new Renderer(this);
         this.createFrame();
     }
@@ -258,6 +268,18 @@ public class View extends JFrame implements KeyListener, WindowFocusListener {
         this.renderer.updateStaticRenderables(renderablesData);
     }
 
+    public boolean isPlanetTracesEnabled() {
+        return this.renderer.isPlanetTracesEnabled();
+    }
+
+    public void setPlanetTracesEnabled(boolean enabled) {
+        this.renderer.setPlanetTracesEnabled(enabled);
+    }
+
+    public void togglePlanetTraces() {
+        this.renderer.setPlanetTracesEnabled(!this.renderer.isPlanetTracesEnabled());
+    }
+
     // *** PROTECTED ***
 
     // region protected Getters (get***)
@@ -306,6 +328,14 @@ public class View extends JFrame implements KeyListener, WindowFocusListener {
 
     protected RenderDTO getRenderData(String entityId) {
         return this.controller.getRenderData(entityId);
+    }
+
+    protected BodyData getBodyData(String entityId) {
+        return this.controller.getBodyData(entityId);
+    }
+
+    protected List<GravitySourceDTO> getGravitySources() {
+        return this.controller.getGravitySources();
     }
 
     protected RenderMetricsDTO getRenderMetrics() {
@@ -363,15 +393,78 @@ public class View extends JFrame implements KeyListener, WindowFocusListener {
 
         this.setFocusable(true);
         this.addKeyListener(this);
+        this.addMouseWheelListener(this);
         this.addWindowFocusListener(this);
 
-        this.renderer.setFocusable(false); // El Renderer NO necesita foco
+        this.renderer.setFocusable(true);
         this.renderer.setIgnoreRepaint(true); // Mejor performance
+        this.renderer.addKeyListener(this);
+        this.renderer.addMouseWheelListener(this);
+        this.renderer.addMouseListener(this);
+        this.renderer.addMouseMotionListener(this);
+
+        this.configureKeyBindings();
 
         this.pack();
         this.setVisible(true);
 
-        SwingUtilities.invokeLater(() -> this.requestFocusInWindow());
+        SwingUtilities.invokeLater(() -> {
+            this.requestFocusInWindow();
+            this.renderer.requestFocusInWindow();
+        });
+    }
+
+    private void configureKeyBindings() {
+        JComponent root = this.getRootPane();
+        if (root == null) {
+            return;
+        }
+
+        this.bindPressRelease(root, KeyEvent.VK_UP);
+        this.bindPressRelease(root, KeyEvent.VK_W);
+        this.bindPressRelease(root, KeyEvent.VK_DOWN);
+        this.bindPressRelease(root, KeyEvent.VK_X);
+        this.bindPressRelease(root, KeyEvent.VK_LEFT);
+        this.bindPressRelease(root, KeyEvent.VK_A);
+        this.bindPressRelease(root, KeyEvent.VK_RIGHT);
+        this.bindPressRelease(root, KeyEvent.VK_D);
+        this.bindPressRelease(root, KeyEvent.VK_SPACE);
+        this.bindPressRelease(root, KeyEvent.VK_1);
+        this.bindPressRelease(root, KeyEvent.VK_T);
+        this.bindPressRelease(root, KeyEvent.VK_Y);
+    }
+
+    private void bindPressRelease(JComponent root, int keyCode) {
+        String pressedAction = "pressed_" + keyCode;
+        String releasedAction = "released_" + keyCode;
+
+        root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .put(KeyStroke.getKeyStroke(keyCode, 0, false), pressedAction);
+        root.getActionMap().put(pressedAction, new AbstractAction() {
+            @Override
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                if (localPlayerId == null || controller == null) {
+                    return;
+                }
+
+                pressedKeys.add(keyCode);
+                processKeyPress(keyCode);
+            }
+        });
+
+        root.getInputMap(JComponent.WHEN_IN_FOCUSED_WINDOW)
+                .put(KeyStroke.getKeyStroke(keyCode, 0, true), releasedAction);
+        root.getActionMap().put(releasedAction, new AbstractAction() {
+            @Override
+            public void actionPerformed(java.awt.event.ActionEvent e) {
+                if (localPlayerId == null || controller == null) {
+                    return;
+                }
+
+                pressedKeys.remove(keyCode);
+                processKeyRelease(keyCode);
+            }
+        });
     }
 
     private void resetAllKeyStates() {
@@ -451,6 +544,7 @@ public class View extends JFrame implements KeyListener, WindowFocusListener {
     @Override
     public void windowGainedFocus(WindowEvent e) {
         this.wasWindowFocused = true;
+        this.renderer.requestFocusInWindow();
         System.out.println("View: Window gained focus");
     }
     // endregion
@@ -465,13 +559,8 @@ public class View extends JFrame implements KeyListener, WindowFocusListener {
 
             int keyCode = e.getKeyCode();
 
-            // Agregar a tracking si ya no estaba presionada
-            if (!this.pressedKeys.contains(keyCode)) {
-                this.pressedKeys.add(keyCode);
-
-                // Process only first press (not OS key repeat)
-                this.processKeyPress(keyCode);
-            }
+            this.pressedKeys.add(keyCode);
+            this.processKeyPress(keyCode);
         } catch (Exception ex) {
             resetAllKeyStates();
             throw new RuntimeException("View: keyPressed event failed", ex);
@@ -536,6 +625,14 @@ public class View extends JFrame implements KeyListener, WindowFocusListener {
             case KeyEvent.VK_1:
                 this.controller.playerSelectNextWeapon(this.localPlayerId);
                 break;
+
+            case KeyEvent.VK_T:
+                this.togglePlanetTraces();
+                break;
+
+            case KeyEvent.VK_Y:
+                this.renderer.recenterCameraOnLocalPlayer();
+                break;
         }
     }
 
@@ -569,6 +666,58 @@ public class View extends JFrame implements KeyListener, WindowFocusListener {
                 this.fireKeyDown.set(false);
                 break;
         }
+    }
+    // endregion
+
+    // region MouseWheelListener
+    @Override
+    public void mouseWheelMoved(MouseWheelEvent e) {
+        int wheelRotation = e.getWheelRotation();
+
+        if (wheelRotation < 0) {
+            this.renderer.zoomIn();
+            return;
+        }
+
+        if (wheelRotation > 0) {
+            this.renderer.zoomOut();
+        }
+    }
+    // endregion
+
+    // region MouseListener
+    @Override
+    public void mousePressed(MouseEvent e) {
+        this.renderer.beginCameraDrag(e.getX(), e.getY());
+        this.renderer.requestFocusInWindow();
+    }
+
+    @Override
+    public void mouseReleased(MouseEvent e) {
+        this.renderer.endCameraDrag();
+    }
+
+    @Override
+    public void mouseClicked(MouseEvent e) {
+    }
+
+    @Override
+    public void mouseEntered(MouseEvent e) {
+    }
+
+    @Override
+    public void mouseExited(MouseEvent e) {
+    }
+    // endregion
+
+    // region MouseMotionListener
+    @Override
+    public void mouseDragged(MouseEvent e) {
+        this.renderer.dragCameraTo(e.getX(), e.getY());
+    }
+
+    @Override
+    public void mouseMoved(MouseEvent e) {
     }
     // endregion
 

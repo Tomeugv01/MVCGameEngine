@@ -1,7 +1,5 @@
 package gameworld;
 
-import java.awt.Dimension;
-
 import engine.assets.ports.AssetType;
 import engine.model.bodies.ports.BodyType;
 import engine.utils.helpers.DoubleVector;
@@ -19,12 +17,11 @@ public final class EarthInCenterWorldDefinitionProvider extends AbstractWorldDef
     @Override
     protected void define() {
 
-        this.setBackgroundStatic("back_3");
+		this.setBackgroundStatic("back_12");
 
         // region Statics
-        this.addGravityBody("stars_2", 2100, 300, 600);
-
-        this.addGravityBody("planet_4", worldWidth / 2.0, worldHeight / 2.0, 500);
+        this.addGravityBody("planet_04", worldWidth / 2.0, worldHeight / 2.0, 1200);
+        this.addGravityBody("moon_05", (worldWidth / 2.0) + 5200.0, (worldHeight / 2.0) - 1800.0, 650);
         // endregion
 
         // region Dynamic bodies
@@ -36,10 +33,20 @@ public final class EarthInCenterWorldDefinitionProvider extends AbstractWorldDef
         // endregion
 
         // region Players
-        this.addSpaceshipPrototypeAnywhereRandomAsset(
-                1, AssetType.SPACESHIP, 1, 60, 120);
+        double earthCenterX = worldWidth / 2.0;
+        double earthCenterY = worldHeight / 2.0;
+        double playerSpawnOffset = 1600.0;
 
-        this.addTrailEmitterCosmetic("stars_6", 100.0, BodyType.DECORATOR, 100.0);
+        this.addSpaceshipRandomAsset(
+            1,
+            AssetType.SPACESHIP,
+            180.0,
+            1.0,
+            90.0,
+            earthCenterX + playerSpawnOffset,
+            earthCenterY);
+
+        this.addTrailEmitterCosmetic("stars_06", 100.0, BodyType.DECORATOR, 100.0);
         // endregion
 
         // region Weapons

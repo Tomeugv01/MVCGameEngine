@@ -6,7 +6,9 @@ import engine.model.bodies.impl.DynamicBody;
 import engine.model.bodies.impl.PlayerBody;
 import engine.model.bodies.impl.StaticBody;
 import engine.model.physics.implementations.BasicPhysicsEngine;
+import engine.model.physics.implementations.CentralGravityPhysicsEngine;
 import engine.model.physics.implementations.NullPhysicsEngine;
+import engine.model.physics.ports.GravitySourceProvider;
 import engine.model.physics.ports.PhysicsEngine;
 import engine.model.physics.ports.PhysicsValuesMDTO;
 import engine.utils.spatial.core.SpatialGrid;
@@ -28,14 +30,25 @@ public class BodyFactory {
             BodyType bodyType,
             double maxLifeTime,
             String emitterId,
-            BodyProfiler profiler) {
+            BodyProfiler profiler,
+            boolean useCentralGravity,
+            GravitySourceProvider gravitySourceProvider,
+            double gravityMassCoefficient,
+            double minGravityDistance) {
 
         AbstractBody body = null;
         PhysicsEngine phyEngine = null;
 
         switch (bodyType) {
             case DYNAMIC:
-                phyEngine = new BasicPhysicsEngine(dto1, dto2, dto3, profiler);
+            phyEngine = useCentralGravity
+                ? new CentralGravityPhysicsEngine(
+                    dto1, dto2, dto3,
+                    profiler,
+                    gravitySourceProvider,
+                    gravityMassCoefficient,
+                    minGravityDistance)
+                : new BasicPhysicsEngine(dto1, dto2, dto3, profiler);
                 body = new DynamicBody(
                         bodyEventProcessor, spatialGrid, phyEngine,
                         BodyType.DYNAMIC,
@@ -43,14 +56,28 @@ public class BodyFactory {
                 break;
 
             case PLAYER:
-                phyEngine = new BasicPhysicsEngine(dto1, dto2, dto3, profiler);
+            phyEngine = useCentralGravity
+                ? new CentralGravityPhysicsEngine(
+                    dto1, dto2, dto3,
+                    profiler,
+                    gravitySourceProvider,
+                    gravityMassCoefficient,
+                    minGravityDistance)
+                : new BasicPhysicsEngine(dto1, dto2, dto3, profiler);
                 body = new PlayerBody(
                         bodyEventProcessor, spatialGrid, phyEngine,
                         maxLifeTime, null, profiler);
                 break;
 
             case PROJECTILE:
-                phyEngine = new BasicPhysicsEngine(dto1, dto2, dto3, profiler);
+            phyEngine = useCentralGravity
+                ? new CentralGravityPhysicsEngine(
+                    dto1, dto2, dto3,
+                    profiler,
+                    gravitySourceProvider,
+                    gravityMassCoefficient,
+                    minGravityDistance)
+                : new BasicPhysicsEngine(dto1, dto2, dto3, profiler);
                 body = new DynamicBody(
                         bodyEventProcessor, 
                         spatialGrid, 

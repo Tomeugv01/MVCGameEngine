@@ -1,6 +1,4 @@
 package engine.view.core;
-
-
 import javax.swing.JPanel;
 
 

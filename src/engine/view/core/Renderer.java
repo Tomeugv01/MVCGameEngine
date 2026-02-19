@@ -5,11 +5,14 @@ package engine.view.core;
 
 // region Imports
 import java.awt.AlphaComposite;
+import java.awt.BasicStroke;
 import java.awt.Canvas;
+import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Graphics2D;
 import java.awt.GraphicsConfiguration;
 import java.awt.GraphicsEnvironment;
+import java.awt.Stroke;
 import java.awt.Toolkit;
 import java.awt.Transparency;
 import java.awt.geom.AffineTransform;
@@ -18,11 +21,15 @@ import java.awt.image.BufferedImage;
 import java.awt.image.VolatileImage;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import engine.controller.ports.EngineState;
+import engine.model.bodies.ports.BodyData;
+import engine.model.physics.ports.GravitySourceDTO;
+import engine.model.physics.ports.PhysicsValuesMDTO;
 import engine.utils.images.ImageCache;
 import engine.utils.images.Images;
 import engine.utils.helpers.DoubleVector;
@@ -132,6 +139,22 @@ public class Renderer extends Canvas implements Runnable {
     // region Constants
     private static final int REFRESH_DELAY_IN_MILLIS = 1; //
     private static final long MONITORING_PERIOD_NS = 750_000_000L;
+    private static final double MIN_ZOOM_FACTOR = 0.01d;
+    private static final double MAX_ZOOM_FACTOR = 2.5d;
+    private static final double ZOOM_STEP = 0.04d;
+    private static final double ZOOM_SMOOTHING_FACTOR = 0.22d;
+    private static final double CAMERA_SMOOTHING_FACTOR = 0.18d;
+    private static final double CAMERA_MAX_SMOOTHING_FACTOR = 0.45d;
+    private static final double CAMERA_SPEED_SMOOTHING_SCALE = 0.00005d;
+    private static final int MAX_TRAJECTORY_STEPS = 5000;
+    private static final double TRAJECTORY_STEP_SECONDS = 0.05d;
+    private static final double TRAJECTORY_GRAVITY_MASS_COEFFICIENT = 0.08d;
+    private static final double TRAJECTORY_GRAVITY_MIN_DISTANCE = 250.0d;
+    private static final int ORBIT_CLOSE_MIN_STEPS = 320;
+    private static final double ORBIT_CLOSE_DISTANCE_MULTIPLIER = 2.0d;
+    private static final double ORBIT_CLOSE_DIRECTION_DOT_MIN = 0.97d;
+    private static final int PLANET_TRACE_STEPS = 480;
+    private static final double PLANET_TRACE_STEP_SECONDS = 0.05d;
 
     // Logs
     private static final boolean DIAGNOSTIC_LOGS_ENABLED = true;
@@ -151,6 +174,8 @@ public class Renderer extends Canvas implements Runnable {
 
     private double cameraX = 0.0d;
     private double cameraY = 0.0d;
+    private volatile double zoomFactor = 1.0d;
+    private volatile double targetZoomFactor = 1.0d;
     private double maxCameraClampY;
     private double maxCameraClampX;
     private double backgroundScrollSpeedX = 0.4;
@@ -167,7 +192,12 @@ public class Renderer extends Canvas implements Runnable {
 
     // Buffers for zero-allocation
     private final Set<String> visibleEntityIds = new LinkedHashSet<>(1600);
-    private final int[] scratchIdxBuffer = new int[1600];
+    private int[] scratchIdxBuffer = new int[4096];
+    private volatile boolean planetTracesEnabled = true;
+    private volatile boolean followLocalPlayer = true;
+    private volatile boolean cameraDragActive = false;
+    private int lastDragMouseX = 0;
+    private int lastDragMouseY = 0;
 
     private final RendererProfiler rendererProfiler = new RendererProfiler(MONITORING_PERIOD_NS);
 
@@ -288,6 +318,87 @@ public class Renderer extends Canvas implements Runnable {
         this.setPreferredSize(new Dimension((int) this.viewDimension.x, (int) this.viewDimension.y));
     }
 
+    public void zoomIn() {
+        this.adjustZoom(1.0d);
+    }
+
+    public void zoomOut() {
+        this.adjustZoom(-1.0d);
+    }
+
+    public void adjustZoom(double direction) {
+        if (direction == 0.0d) {
+            return;
+        }
+
+        double sign = Math.signum(direction);
+        double baseZoom = Math.max(this.targetZoomFactor, MIN_ZOOM_FACTOR);
+        double adaptiveDelta = baseZoom * ZOOM_STEP * sign;
+
+        this.targetZoomFactor = clamp(this.targetZoomFactor + adaptiveDelta, MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR);
+    }
+
+    public boolean isPlanetTracesEnabled() {
+        return this.planetTracesEnabled;
+    }
+
+    public void setPlanetTracesEnabled(boolean enabled) {
+        this.planetTracesEnabled = enabled;
+    }
+
+    public void beginCameraDrag(int mouseX, int mouseY) {
+        this.cameraDragActive = true;
+        this.followLocalPlayer = false;
+        this.lastDragMouseX = mouseX;
+        this.lastDragMouseY = mouseY;
+    }
+
+    public void dragCameraTo(int mouseX, int mouseY) {
+        if (!this.cameraDragActive) {
+            return;
+        }
+
+        int dxPixels = mouseX - this.lastDragMouseX;
+        int dyPixels = mouseY - this.lastDragMouseY;
+
+        this.lastDragMouseX = mouseX;
+        this.lastDragMouseY = mouseY;
+
+        if (dxPixels == 0 && dyPixels == 0) {
+            return;
+        }
+
+        double dxWorld = dxPixels / Math.max(this.zoomFactor, 0.001d);
+        double dyWorld = dyPixels / Math.max(this.zoomFactor, 0.001d);
+
+        this.cameraX = clamp(this.cameraX - dxWorld, 0.0, this.maxCameraClampX);
+        this.cameraY = clamp(this.cameraY - dyWorld, 0.0, this.maxCameraClampY);
+    }
+
+    public void endCameraDrag() {
+        this.cameraDragActive = false;
+    }
+
+    public void recenterCameraOnLocalPlayer() {
+        this.followLocalPlayer = true;
+
+        String localPlayerId = this.view.getLocalPlayerId();
+        if (localPlayerId == null || localPlayerId.isBlank()) {
+            return;
+        }
+
+        RenderDTO playerData = this.view.getRenderData(localPlayerId);
+        if (playerData == null) {
+            return;
+        }
+
+        double visibleWorldWidth = this.getVisibleWorldWidth();
+        double visibleWorldHeight = this.getVisibleWorldHeight();
+
+        this.cameraX = clamp(playerData.posX - (visibleWorldWidth * 0.5d), 0.0, this.maxCameraClampX);
+        this.cameraY = clamp(playerData.posY - (visibleWorldHeight * 0.5d), 0.0, this.maxCameraClampY);
+    }
+
     // endregion
 
     public void updateStaticRenderables(ArrayList<RenderDTO> renderablesData) {
@@ -372,6 +483,242 @@ public class Renderer extends Canvas implements Runnable {
                 RendererProfiler.METRIC_DRAW_HUDS, hudsStart); // Profiler
     }
 
+    private void drawTrajectory(Graphics2D g) {
+        String localPlayerId = this.view.getLocalPlayerId();
+        if (localPlayerId == null || localPlayerId.isBlank()) {
+            return;
+        }
+
+        BodyData playerBodyData = this.view.getBodyData(localPlayerId);
+        if (playerBodyData == null) {
+            return;
+        }
+
+        PhysicsValuesMDTO physics = playerBodyData.getPhysicsValues();
+        if (physics == null) {
+            return;
+        }
+
+        List<GravitySourceDTO> gravitySources = this.view.getGravitySources();
+
+        double x = physics.posX;
+        double y = physics.posY;
+        double angle = physics.angle;
+        double thrust = physics.thrust;
+        double speedX = physics.speedX;
+        double speedY = physics.speedY;
+        double angularSpeed = physics.angularSpeed;
+        double angularAcc = physics.angularAcc;
+        double startX = x;
+        double startY = y;
+        double startSpeedX = speedX;
+        double startSpeedY = speedY;
+        double startSpeedMag = Math.hypot(startSpeedX, startSpeedY);
+        double orbitCloseDistance = Math.max(physics.size * ORBIT_CLOSE_DISTANCE_MULTIPLIER, 25.0d);
+        double movedAwayDistance = Math.max(physics.size * 8.0d, orbitCloseDistance * 4.0d);
+        boolean movedAwayFromStart = false;
+
+        Stroke oldStroke = g.getStroke();
+        Color oldColor = g.getColor();
+
+        float lineWidth = (float) (1.8d / Math.max(this.zoomFactor, 0.001d));
+        g.setStroke(new BasicStroke(lineWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.setColor(new Color(80, 220, 255, 180));
+
+        double worldWidth = this.view.getWorldDimension().x;
+        double worldHeight = this.view.getWorldDimension().y;
+
+        for (int i = 0; i < MAX_TRAJECTORY_STEPS; i++) {
+            double angleRad = Math.toRadians(angle);
+            double thrustAccX = thrust == 0.0d ? 0.0d : Math.cos(angleRad) * thrust;
+            double thrustAccY = thrust == 0.0d ? 0.0d : Math.sin(angleRad) * thrust;
+
+            double gravityAccX = 0.0d;
+            double gravityAccY = 0.0d;
+
+            if (gravitySources != null && !gravitySources.isEmpty()) {
+                for (GravitySourceDTO source : gravitySources) {
+                    if (source == null || source.radius <= 0.0d) {
+                        continue;
+                    }
+
+                    double dx = source.posX - x;
+                    double dy = source.posY - y;
+                    double distSq = dx * dx + dy * dy;
+
+                    double softDistance = Math.max(TRAJECTORY_GRAVITY_MIN_DISTANCE, source.radius);
+                    double softDistanceSq = softDistance * softDistance;
+                    if (distSq < softDistanceSq) {
+                        distSq = softDistanceSq;
+                    }
+
+                    double dist = Math.sqrt(distSq);
+                    double sourceMass = TRAJECTORY_GRAVITY_MASS_COEFFICIENT * source.radius * source.radius * source.radius;
+                    if (sourceMass <= 0.0d) {
+                        continue;
+                    }
+
+                    double accMag = sourceMass / distSq;
+                    gravityAccX += accMag * (dx / dist);
+                    gravityAccY += accMag * (dy / dist);
+                }
+            }
+
+            double accX = thrustAccX + gravityAccX;
+            double accY = thrustAccY + gravityAccY;
+
+            double newSpeedX = speedX + accX * TRAJECTORY_STEP_SECONDS;
+            double newSpeedY = speedY + accY * TRAJECTORY_STEP_SECONDS;
+            double avgSpeedX = (speedX + newSpeedX) * 0.5d;
+            double avgSpeedY = (speedY + newSpeedY) * 0.5d;
+
+            double nextX = x + avgSpeedX * TRAJECTORY_STEP_SECONDS;
+            double nextY = y + avgSpeedY * TRAJECTORY_STEP_SECONDS;
+
+            double newAngularSpeed = angularSpeed + angularAcc * TRAJECTORY_STEP_SECONDS;
+            double newAngle = angle
+                    + angularSpeed * TRAJECTORY_STEP_SECONDS
+                    + 0.5d * newAngularSpeed * TRAJECTORY_STEP_SECONDS * TRAJECTORY_STEP_SECONDS;
+            newAngle = ((newAngle % 360.0d) + 360.0d) % 360.0d;
+
+            g.drawLine((int) Math.round(x), (int) Math.round(y),
+                    (int) Math.round(nextX), (int) Math.round(nextY));
+
+            if (nextX < 0 || nextX > worldWidth || nextY < 0 || nextY > worldHeight) {
+                break;
+            }
+
+            speedX = newSpeedX;
+            speedY = newSpeedY;
+            angularSpeed = newAngularSpeed;
+            angle = newAngle;
+            x = nextX;
+            y = nextY;
+
+            double distFromStart = Math.hypot(x - startX, y - startY);
+            if (!movedAwayFromStart && distFromStart >= movedAwayDistance) {
+                movedAwayFromStart = true;
+            }
+
+            if (!movedAwayFromStart || i < ORBIT_CLOSE_MIN_STEPS) {
+                continue;
+            }
+
+            if (distFromStart > orbitCloseDistance) {
+                continue;
+            }
+
+            double speedMag = Math.hypot(speedX, speedY);
+            if (startSpeedMag <= 0.0001d || speedMag <= 0.0001d) {
+                break;
+            }
+
+            double directionDot = ((startSpeedX * speedX) + (startSpeedY * speedY))
+                    / (startSpeedMag * speedMag);
+
+            if (directionDot >= ORBIT_CLOSE_DIRECTION_DOT_MIN) {
+                break;
+            }
+        }
+
+        g.setStroke(oldStroke);
+        g.setColor(oldColor);
+    }
+
+    private void drawPlanetTraces(Graphics2D g) {
+        if (!this.planetTracesEnabled) {
+            return;
+        }
+
+        List<GravitySourceDTO> gravitySources = this.view.getGravitySources();
+        if (gravitySources == null || gravitySources.isEmpty()) {
+            return;
+        }
+
+        Stroke oldStroke = g.getStroke();
+        Color oldColor = g.getColor();
+
+        float lineWidth = (float) (1.25d / Math.max(this.zoomFactor, 0.001d));
+        g.setStroke(new BasicStroke(lineWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+        g.setColor(new Color(255, 220, 120, 150));
+
+        for (GravitySourceDTO source : gravitySources) {
+            if (source == null || source.bodyId == null || source.bodyId.isBlank()) {
+                continue;
+            }
+
+            BodyData sourceBodyData = this.view.getBodyData(source.bodyId);
+            if (sourceBodyData == null || sourceBodyData.getPhysicsValues() == null) {
+                continue;
+            }
+
+            PhysicsValuesMDTO phy = sourceBodyData.getPhysicsValues();
+            double x = phy.posX;
+            double y = phy.posY;
+            double speedX = phy.speedX;
+            double speedY = phy.speedY;
+
+            for (int i = 0; i < PLANET_TRACE_STEPS; i++) {
+                double gravityAccX = 0.0d;
+                double gravityAccY = 0.0d;
+
+                for (GravitySourceDTO attractor : gravitySources) {
+                    if (attractor == null || attractor.radius <= 0.0d || source.bodyId.equals(attractor.bodyId)) {
+                        continue;
+                    }
+
+                    double dx = attractor.posX - x;
+                    double dy = attractor.posY - y;
+                    double distSq = dx * dx + dy * dy;
+
+                    double softDistance = Math.max(TRAJECTORY_GRAVITY_MIN_DISTANCE, attractor.radius);
+                    double softDistanceSq = softDistance * softDistance;
+                    if (distSq < softDistanceSq) {
+                        distSq = softDistanceSq;
+                    }
+
+                    double dist = Math.sqrt(distSq);
+                    double sourceMass = TRAJECTORY_GRAVITY_MASS_COEFFICIENT
+                            * attractor.radius * attractor.radius * attractor.radius;
+                    if (sourceMass <= 0.0d) {
+                        continue;
+                    }
+
+                    double accMag = sourceMass / distSq;
+                    gravityAccX += accMag * (dx / dist);
+                    gravityAccY += accMag * (dy / dist);
+                }
+
+                double nextSpeedX = speedX + gravityAccX * PLANET_TRACE_STEP_SECONDS;
+                double nextSpeedY = speedY + gravityAccY * PLANET_TRACE_STEP_SECONDS;
+                double avgSpeedX = (speedX + nextSpeedX) * 0.5d;
+                double avgSpeedY = (speedY + nextSpeedY) * 0.5d;
+
+                double nextX = x + avgSpeedX * PLANET_TRACE_STEP_SECONDS;
+                double nextY = y + avgSpeedY * PLANET_TRACE_STEP_SECONDS;
+
+                g.drawLine(
+                        (int) Math.round(x),
+                        (int) Math.round(y),
+                        (int) Math.round(nextX),
+                        (int) Math.round(nextY));
+
+                x = nextX;
+                y = nextY;
+                speedX = nextSpeedX;
+                speedY = nextSpeedY;
+
+                DoubleVector worldDim = this.view.getWorldDimension();
+                if (x < 0.0d || y < 0.0d || x > worldDim.x || y > worldDim.y) {
+                    break;
+                }
+            }
+        }
+
+        g.setStroke(oldStroke);
+        g.setColor(oldColor);
+    }
+
     private void drawStatics(Graphics2D g) {
         long staticStart = this.rendererProfiler.startInterval(); // Profiler
 
@@ -402,6 +749,8 @@ public class Renderer extends Canvas implements Runnable {
 
                 this.drawStatics(gg);
                 this.drawDynamics(gg, visibleIds);
+                this.drawPlanetTraces(gg);
+                this.drawTrajectory(gg);
 
                 gg.setTransform(defaultTransform);
 
@@ -503,8 +852,8 @@ public class Renderer extends Canvas implements Runnable {
             return false;
         }
 
-        double viewW = this.viewDimension.x;
-        double viewH = this.viewDimension.y;
+        double viewW = this.getVisibleWorldWidth();
+        double viewH = this.getVisibleWorldHeight();
 
         double camLeft = this.cameraX;
         double camTop = this.cameraY;
@@ -544,54 +893,62 @@ public class Renderer extends Canvas implements Runnable {
             return; // ======= No world or view dimensions info ======= >>
         }
 
-        this.maxCameraClampX = Math.max(0.0, woldDim.x - this.viewDimension.x);
-        this.maxCameraClampY = Math.max(0.0, woldDim.y - this.viewDimension.y);
+        this.maxCameraClampX = Math.max(0.0, woldDim.x - this.getVisibleWorldWidth());
+        this.maxCameraClampY = Math.max(0.0, woldDim.y - this.getVisibleWorldHeight());
     }
     // endregion
 
     // region updaters (update***)
     private void updateCamera() {
-        Renderable localPlayerRenderable = this.getLocalPlayerRenderable();
+        if (!this.followLocalPlayer) {
+            this.cameraX = clamp(this.cameraX, 0.0, this.maxCameraClampX);
+            this.cameraY = clamp(this.cameraY, 0.0, this.maxCameraClampY);
+            return;
+        }
+
+        String localPlayerId = this.view.getLocalPlayerId();
         DoubleVector worldDim = this.view.getWorldDimension();
 
-        if (localPlayerRenderable == null || this.viewDimension == null || worldDim == null) {
+        if (localPlayerId == null || localPlayerId.isEmpty() || this.viewDimension == null || worldDim == null) {
             return; // ======== No player or data to follow =======>>
         }
 
-        RenderDTO playerData = localPlayerRenderable.getRenderData();
-
-        double playerX = playerData.posX - this.cameraX;
-        double playerY = playerData.posY - this.cameraY;
-
-        double desiredX;
-        double desiredY;
-
-        double minX = this.viewDimension.x * 0.3;
-        double maxX = this.viewDimension.x * 0.7;
-        double minY = this.viewDimension.y * 0.3;
-        double maxY = this.viewDimension.y * 0.7;
-
-        if (playerX < minX) {
-            desiredX = playerData.posX - minX;
-        } else if (playerX > maxX) {
-            desiredX = playerData.posX - maxX;
-        } else {
-            desiredX = playerData.posX - (playerX);
+        RenderDTO playerData = this.view.getRenderData(localPlayerId);
+        if (playerData == null) {
+            Renderable localPlayerRenderable = this.getLocalPlayerRenderable();
+            if (localPlayerRenderable != null) {
+                playerData = localPlayerRenderable.getRenderData();
+            }
         }
 
-        if (playerY < minY) {
-            desiredY = playerData.posY - minY;
-        } else if (playerY > maxY) {
-            desiredY = playerData.posY - maxY;
-        } else {
-            desiredY = playerData.posY - (playerY);
+        if (playerData == null) {
+            return;
         }
 
-        // double desiredX = playerData.posX - (this.viewDimension.x / 2.0d);
-        // double desiredY = playerData.posY - (this.viewDimension.y / 2.0d);
+        double visibleWorldWidth = this.getVisibleWorldWidth();
+        double visibleWorldHeight = this.getVisibleWorldHeight();
+        double desiredX = playerData.posX - (visibleWorldWidth * 0.5d);
+        double desiredY = playerData.posY - (visibleWorldHeight * 0.5d);
+        boolean isZoomTransitioning = Math.abs(this.targetZoomFactor - this.zoomFactor) > 0.001d;
 
-        this.cameraX += (desiredX - this.cameraX);
-        this.cameraY += (desiredY - this.cameraY);
+        if (isZoomTransitioning) {
+            this.cameraX = desiredX;
+            this.cameraY = desiredY;
+        } else {
+            double smoothing = CAMERA_SMOOTHING_FACTOR;
+            BodyData playerBodyData = this.view.getBodyData(localPlayerId);
+            if (playerBodyData != null && playerBodyData.getPhysicsValues() != null) {
+                PhysicsValuesMDTO phyValues = playerBodyData.getPhysicsValues();
+                double speed = Math.hypot(phyValues.speedX, phyValues.speedY);
+                smoothing = clamp(
+                        CAMERA_SMOOTHING_FACTOR + (speed * CAMERA_SPEED_SMOOTHING_SCALE),
+                        CAMERA_SMOOTHING_FACTOR,
+                        CAMERA_MAX_SMOOTHING_FACTOR);
+            }
+
+            this.cameraX += (desiredX - this.cameraX) * smoothing;
+            this.cameraY += (desiredY - this.cameraY) * smoothing;
+        }
 
         // // Clamp when camera goes out of world limits
         this.cameraX = clamp(cameraX, 0.0, this.maxCameraClampX);
@@ -629,7 +986,15 @@ public class Renderer extends Canvas implements Runnable {
         long translateStart = this.rendererProfiler.startInterval(); // Profiler
 
         AffineTransform defaultTransform = gg.getTransform();
-        gg.translate(-this.cameraX, -this.cameraY);
+
+        double visibleWorldWidth = this.getVisibleWorldWidth();
+        double visibleWorldHeight = this.getVisibleWorldHeight();
+        double centerWorldX = this.cameraX + (visibleWorldWidth * 0.5d);
+        double centerWorldY = this.cameraY + (visibleWorldHeight * 0.5d);
+
+        gg.translate(this.viewDimension.x * 0.5d, this.viewDimension.y * 0.5d);
+        gg.scale(this.zoomFactor, this.zoomFactor);
+        gg.translate(-centerWorldX, -centerWorldY);
 
         this.rendererProfiler.stopInterval(
                 RendererProfiler.METRIC_TRANSLATE, translateStart); // Profiler
@@ -645,6 +1010,91 @@ public class Renderer extends Canvas implements Runnable {
             return max;
         }
         return value;
+    }
+
+    private double getVisibleWorldWidth() {
+        if (this.viewDimension == null) {
+            return 0.0d;
+        }
+
+        return this.viewDimension.x / this.zoomFactor;
+    }
+
+    private double getVisibleWorldHeight() {
+        if (this.viewDimension == null) {
+            return 0.0d;
+        }
+
+        return this.viewDimension.y / this.zoomFactor;
+    }
+
+    private void updateZoom() {
+        double delta = this.targetZoomFactor - this.zoomFactor;
+
+        if (Math.abs(delta) <= 0.001d) {
+            this.zoomFactor = this.targetZoomFactor;
+            return;
+        }
+
+        this.zoomFactor += delta * ZOOM_SMOOTHING_FACTOR;
+        this.zoomFactor = clamp(this.zoomFactor, MIN_ZOOM_FACTOR, MAX_ZOOM_FACTOR);
+
+        this.setCameraClampLimits();
+        this.cameraX = clamp(this.cameraX, 0.0, this.maxCameraClampX);
+        this.cameraY = clamp(this.cameraY, 0.0, this.maxCameraClampY);
+    }
+
+    private int parseRequiredCells(String message) {
+        if (message == null || message.isBlank()) {
+            return -1;
+        }
+
+        String marker = "requires ";
+        int markerIdx = message.indexOf(marker);
+        if (markerIdx < 0) {
+            return -1;
+        }
+
+        int start = markerIdx + marker.length();
+        int end = start;
+
+        while (end < message.length() && Character.isDigit(message.charAt(end))) {
+            end++;
+        }
+
+        if (end <= start) {
+            return -1;
+        }
+
+        try {
+            return Integer.parseInt(message.substring(start, end));
+        } catch (NumberFormatException ex) {
+            return -1;
+        }
+    }
+
+    private Set<String> queryVisibleEntitiesSafe(double minX, double maxX, double minY, double maxY) {
+        while (true) {
+            try {
+                return this.view.queryEntitiesInRegion(
+                        minX, maxX,
+                        minY, maxY,
+                        this.scratchIdxBuffer,
+                        this.visibleEntityIds);
+            } catch (IllegalArgumentException ex) {
+                int required = this.parseRequiredCells(ex.getMessage());
+                if (required <= this.scratchIdxBuffer.length) {
+                    throw ex;
+                }
+
+                int newSize = required + 512;
+                if (newSize <= this.scratchIdxBuffer.length) {
+                    throw ex;
+                }
+
+                this.scratchIdxBuffer = new int[newSize];
+            }
+        }
     }
 
     // *** INTERFACE IMPLEMENTATIONS ***
@@ -674,30 +1124,36 @@ public class Renderer extends Canvas implements Runnable {
 
                 this.currentFrame++;
                 this.rendererProfiler.addFrame();
+                this.updateZoom();
 
                 // 1) Calculate Visible Entities (at frame -1)
                 String localPlayerId = this.view.getLocalPlayerId();
                 double minX, maxX, minY, maxY;
+                double visibleWorldWidth = this.getVisibleWorldWidth();
+                double visibleWorldHeight = this.getVisibleWorldHeight();
 
                 if (localPlayerId == null || localPlayerId.isEmpty()) {
                     minX = 0;
                     minY = 0;
-                    maxX = this.viewDimension.x * 2;
-                    maxY = this.viewDimension.y * 2;
+                    maxX = visibleWorldWidth;
+                    maxY = visibleWorldHeight;
                 } else {
                     RenderDTO renderLocalPlayerData = this.view.getRenderData(localPlayerId);
 
-                    minX = renderLocalPlayerData.posX - (this.viewDimension.x);
-                    minY = renderLocalPlayerData.posY - (this.viewDimension.y);
-                    maxX = renderLocalPlayerData.posX + (this.viewDimension.x);
-                    maxY = renderLocalPlayerData.posY + (this.viewDimension.y);
+                    double halfVisibleWorldWidth = visibleWorldWidth * 0.5d;
+                    double halfVisibleWorldHeight = visibleWorldHeight * 0.5d;
+
+                    minX = renderLocalPlayerData.posX - halfVisibleWorldWidth;
+                    minY = renderLocalPlayerData.posY - halfVisibleWorldHeight;
+                    maxX = renderLocalPlayerData.posX + halfVisibleWorldWidth;
+                    maxY = renderLocalPlayerData.posY + halfVisibleWorldHeight;
                 }
 
-                Set<String> visibleIds = this.view.queryEntitiesInRegion(
-                        minX, maxX,
-                        minY, maxY,
-                        this.scratchIdxBuffer,
-                        this.visibleEntityIds);
+                Set<String> visibleIds = this.queryVisibleEntitiesSafe(minX, maxX, minY, maxY);
+
+                if (localPlayerId != null && !localPlayerId.isEmpty()) {
+                    visibleIds.add(localPlayerId);
+                }
 
                 // 2) Snapshot of dynamic render data
 

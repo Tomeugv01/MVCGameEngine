@@ -61,7 +61,7 @@ public class BasicPhysicsEngine extends AbstractPhysicsEngine {
     @Override
     public boolean isThrusting() {
         PhysicsValuesMDTO phyValues = this.getPhysicsValues();
-        return phyValues.thrust != 0.0d;
+        return this.isEffectiveThrusting(phyValues);
     }
 
     // region Rebounds
@@ -210,9 +210,10 @@ public class BasicPhysicsEngine extends AbstractPhysicsEngine {
         double accX = 0d;
         double accY = 0d;
         double angleRad = Math.toRadians(phyVals.angle);
-        if (phyVals.thrust != 0.0d) {
-            accX = Math.cos(angleRad) * phyVals.thrust;
-            accY = Math.sin(angleRad) * phyVals.thrust;
+        double effectiveThrust = this.getEffectiveThrust(phyVals);
+        if (effectiveThrust != 0.0d) {
+            accX = Math.cos(angleRad) * effectiveThrust;
+            accY = Math.sin(angleRad) * effectiveThrust;
         }
         this.profiler.stopInterval("PHYSICS_THRUST", thrustStart);
 
@@ -254,7 +255,7 @@ public class BasicPhysicsEngine extends AbstractPhysicsEngine {
                 accX, accY, // only for information and debugging
                 newAngularSpeed,
                 phyVals.angularAcc, // keep same angular acc
-                phyVals.thrust // keep same thrust
+            effectiveThrust // keep same thrust
         );
         this.profiler.stopInterval("PHYSICS_DTO", dtoStart);
 

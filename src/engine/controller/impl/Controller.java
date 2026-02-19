@@ -20,6 +20,7 @@ import engine.events.domain.ports.eventtype.DomainEvent;
 import engine.model.bodies.ports.BodyData;
 import engine.model.emitter.ports.EmitterConfigDto;
 import engine.model.impl.Model;
+import engine.model.physics.ports.GravitySourceDTO;
 import engine.model.ports.DomainEventProcessor;
 import engine.utils.helpers.DoubleVector;
 import engine.view.core.View;
@@ -271,6 +272,14 @@ public class Controller implements WorldManager, DomainEventProcessor {
             return null;
         }
         return RenderableMapper.fromBodyDTO(bodyData);
+    }
+
+    public BodyData getBodyData(String entityId) {
+        return this.model.getBodyData(entityId);
+    }
+
+    public List<GravitySourceDTO> getGravitySources() {
+        return this.model.getGravitySources();
     }
 
     public DoubleVector getWorldDimension() {

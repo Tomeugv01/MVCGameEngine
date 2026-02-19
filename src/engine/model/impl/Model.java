@@ -33,6 +33,8 @@ import engine.model.bodies.ports.BodyType;
 import engine.model.bodies.ports.PlayerDTO;
 import engine.model.emitter.impl.BasicEmitter;
 import engine.model.emitter.ports.EmitterConfigDto;
+import engine.model.physics.ports.GravitySourceDTO;
+import engine.model.physics.ports.GravitySourceProvider;
 import engine.model.physics.ports.PhysicsValuesMDTO;
 import engine.model.ports.DomainEventProcessor;
 import engine.model.ports.ModelState;
@@ -161,13 +163,16 @@ import engine.utils.spatial.ports.SpatialGridStatisticsDTO;
  * - Spatial partitioning for O(n) collision detection instead of O(n²)
  */
 
-public class Model implements BodyEventProcessor {
+public class Model implements BodyEventProcessor, GravitySourceProvider {
 
     // region Constants
     private static final int DEFAULT_MAX_BODIES = 5000;
     private static final int SPATIAL_GRID_CELL_SIZE = 64;
-    private static final int MAX_CELLS_PER_BODY = 1512;
+    private static final int MAX_CELLS_PER_BODY = 4096;
     private static final int DEFAULT_BATCH_SIZE = 10;
+    private static final boolean ENABLE_OBJECT_GRAVITY = true;
+    private static final double GRAVITY_MASS_COEFFICIENT = 0.08d;
+    private static final double GRAVITY_MIN_DISTANCE = 250.0d;
     // endregion
 
     // region Fields
@@ -276,7 +281,11 @@ public class Model implements BodyEventProcessor {
                 bodyType,
                 maxLifeTime,
                 shooterId,
-                this.bodyProfiler);
+            this.bodyProfiler,
+            ENABLE_OBJECT_GRAVITY,
+            this,
+            GRAVITY_MASS_COEFFICIENT,
+            GRAVITY_MIN_DISTANCE);
 
         // Prepare body state
         body.activate();
@@ -318,9 +327,17 @@ public class Model implements BodyEventProcessor {
     }
 
     public String addStatic(double size, double posX, double posY, double angle, double maxLifeInSeconds) {
+        return this.addStatic(size, posX, posY, 0, 0, angle, 0, maxLifeInSeconds);
+    }
+
+    public String addStatic(double size,
+            double posX, double posY, double speedX, double speedY,
+            double angle, double angularSpeed,
+            double maxLifeInSeconds) {
+
         String entityId = this.addBody(BodyType.GRAVITY,
-                size, posX, posY, 0, 0, 0, 0,
-                angle, 0, 0,
+                size, posX, posY, speedX, speedY, 0, 0,
+                angle, angularSpeed, 0,
                 0, maxLifeInSeconds, null);
 
         return entityId;
@@ -453,6 +470,9 @@ public class Model implements BodyEventProcessor {
 
         for (String entityId : inRegionIds) {
             AbstractBody body = this.dynamicBodies.get(entityId);
+            if (body == null) {
+                body = this.gravityBodies.get(entityId);
+            }
 
             if (body != null) {
                 PhysicsValuesMDTO phyValues = body.getPhysicsValues();
@@ -707,6 +727,29 @@ public class Model implements BodyEventProcessor {
     }
     // endregion
 
+    // region GravitySourceProvider
+    @Override
+    public List<GravitySourceDTO> getGravitySources() {
+        ArrayList<GravitySourceDTO> sources = new ArrayList<>(this.gravityBodies.size());
+
+        this.gravityBodies.forEach((entityId, body) -> {
+            if (body == null || body.getBodyState() == BodyState.DEAD) {
+                return;
+            }
+
+            PhysicsValuesMDTO phyValues = body.getPhysicsValues();
+            if (phyValues == null) {
+                return;
+            }
+
+            double radius = Math.max(1.0d, phyValues.size * 0.5d);
+            sources.add(new GravitySourceDTO(entityId, phyValues.posX, phyValues.posY, radius));
+        });
+
+        return sources;
+    }
+    // endregion
+
     // *** PRIVATE ***
 
     // region Check methods (check***)
@@ -735,12 +778,10 @@ public class Model implements BodyEventProcessor {
             if (!seen.add(otherBodyId))
                 continue;
 
-            // Dedupe by symetry only if otherBody type is not GRAVITY!!!
-            // Gravity bodies do not move, so they not do check collisions
-            // So symetric dedupe in gravity bodies is NEVER necessary
-            if (otherBody.getBodyType() != BodyType.GRAVITY)
-                if (checkBody.getBodyId().compareTo(otherBodyId) >= 0)
-                    continue; // ======== Symetric dedupe ON =========>
+            // Dedupe by symmetry for all collidable bodies.
+            // Gravity bodies are now simulated and can also perform collision checks.
+            if (checkBody.getBodyId().compareTo(otherBodyId) >= 0)
+                continue; // ======== Symmetric dedupe ON =========>
 
             if (!this.isCollidable(otherBody)) {
                 continue;
@@ -924,6 +965,15 @@ public class Model implements BodyEventProcessor {
                 spatialGridUpsert((AbstractBody) body);
                 break;
 
+            case MOVE_REBOUND_FROM_BODY:
+                if (action.relatedEvent instanceof CollisionEvent collisionEvent) {
+                    this.reboundFromBody(body, collisionEvent, newPhyValues);
+                } else {
+                    body.doMovement(newPhyValues);
+                    spatialGridUpsert((AbstractBody) body);
+                }
+                break;
+
             case MOVE_REBOUND_IN_EAST:
                 body.reboundInEast(newPhyValues, this.worldWidth, this.worldHeight);
                 spatialGridUpsert((AbstractBody) body);
@@ -1004,6 +1054,73 @@ public class Model implements BodyEventProcessor {
             default:
                 break;
         }
+    }
+
+    private void reboundFromBody(AbstractBody body, CollisionEvent collisionEvent, PhysicsValuesMDTO newPhyValues) {
+        if (collisionEvent == null || collisionEvent.secondaryBodyRef == null) {
+            body.doMovement(newPhyValues);
+            spatialGridUpsert(body);
+            return;
+        }
+
+        String bodyId = body.getBodyId();
+        String primaryId = collisionEvent.primaryBodyRef.id();
+        String secondaryId = collisionEvent.secondaryBodyRef.id();
+
+        String otherBodyId = bodyId.equals(primaryId) ? secondaryId : primaryId;
+        AbstractBody otherBody = this.getBody(otherBodyId);
+        if (otherBody == null) {
+            body.doMovement(newPhyValues);
+            spatialGridUpsert(body);
+            return;
+        }
+
+        PhysicsValuesMDTO otherPhyValues = otherBody.getPhysicsValues();
+
+        double normalX = newPhyValues.posX - otherPhyValues.posX;
+        double normalY = newPhyValues.posY - otherPhyValues.posY;
+
+        double normalLength = Math.sqrt(normalX * normalX + normalY * normalY);
+        if (normalLength < 1e-9d) {
+            normalX = 1.0d;
+            normalY = 0.0d;
+            normalLength = 1.0d;
+        }
+
+        normalX /= normalLength;
+        normalY /= normalLength;
+
+        double oldSpeedX = newPhyValues.speedX;
+        double oldSpeedY = newPhyValues.speedY;
+        double dot = oldSpeedX * normalX + oldSpeedY * normalY;
+
+        double reboundSpeedX = oldSpeedX - (2.0d * dot * normalX);
+        double reboundSpeedY = oldSpeedY - (2.0d * dot * normalY);
+
+        double bodyRadius = newPhyValues.size * 0.5d * 0.9d;
+        double otherRadius = otherPhyValues.size * 0.5d * 0.9d;
+        double separation = bodyRadius + otherRadius + 0.5d;
+
+        double correctedPosX = otherPhyValues.posX + normalX * separation;
+        double correctedPosY = otherPhyValues.posY + normalY * separation;
+
+        PhysicsValuesMDTO reboundValues = this.physicsValuesPool.acquire();
+        reboundValues.update(
+                newPhyValues.timeStamp,
+                correctedPosX,
+                correctedPosY,
+                newPhyValues.angle,
+                newPhyValues.size,
+                reboundSpeedX,
+                reboundSpeedY,
+                newPhyValues.accX,
+                newPhyValues.accY,
+                newPhyValues.angularSpeed,
+                newPhyValues.angularAcc,
+                newPhyValues.thrust);
+
+        body.doMovement(reboundValues);
+        spatialGridUpsert(body);
     }
 
     private void executeActionList(

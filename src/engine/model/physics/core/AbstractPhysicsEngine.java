@@ -1,7 +1,5 @@
 package engine.model.physics.core;
 
-import static java.lang.System.nanoTime;
-
 import java.util.concurrent.atomic.AtomicReference;
 
 import engine.model.physics.ports.PhysicsEngine;
@@ -12,6 +10,7 @@ public abstract class AbstractPhysicsEngine implements PhysicsEngine {
         private final AtomicReference<PhysicsValuesMDTO> phyValues; // Current values (DTO#1)
         protected PhysicsValuesMDTO nextPhyValues; // Next frame values (DTO#2)
         protected PhysicsValuesMDTO snapshotDTO; // Snapshot for rendering (DTO#3)
+        private volatile double commandedThrust = Double.NaN;
 
         // region Constructors
         public AbstractPhysicsEngine(PhysicsValuesMDTO dto1, PhysicsValuesMDTO dto2, PhysicsValuesMDTO dto3) {
@@ -104,6 +103,7 @@ public abstract class AbstractPhysicsEngine implements PhysicsEngine {
         }
 
         public final void setThrust(double thrust) {
+                this.commandedThrust = thrust;
                 PhysicsValuesMDTO old = this.getPhysicsValues();
                 
                 // Update nextPhyValues instead of creating new DTO
@@ -123,6 +123,7 @@ public abstract class AbstractPhysicsEngine implements PhysicsEngine {
 
         @Override
         public void stopPushing() {
+                this.commandedThrust = 0.0d;
                 PhysicsValuesMDTO old = this.getPhysicsValues();
                 
                 // Update nextPhyValues instead of creating new DTO
@@ -137,5 +138,14 @@ public abstract class AbstractPhysicsEngine implements PhysicsEngine {
                                 0.0d); // Reset thrust
                 
                 this.setPhysicsValues(nextPhyValues);
+        }
+
+        protected final double getEffectiveThrust(PhysicsValuesMDTO phyValues) {
+                double thrust = this.commandedThrust;
+                return Double.isNaN(thrust) ? phyValues.thrust : thrust;
+        }
+
+        protected final boolean isEffectiveThrusting(PhysicsValuesMDTO phyValues) {
+                return this.getEffectiveThrust(phyValues) != 0.0d;
         }
 }

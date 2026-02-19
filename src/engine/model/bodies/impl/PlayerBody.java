@@ -41,7 +41,7 @@ public class PlayerBody extends DynamicBody {
                 emitterId,
                 profiler);
 
-        this.setMaxThrustForce(800);
+        this.setMaxThrustForce(1400);
         this.setMaxAngularAcceleration(1000);
         this.setAngularSpeed(30);
     }

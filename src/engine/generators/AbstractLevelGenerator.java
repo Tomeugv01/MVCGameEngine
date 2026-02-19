@@ -7,7 +7,6 @@ import engine.controller.ports.WorldManager;
 import engine.world.ports.DefEmitterDTO;
 import engine.world.ports.DefItem;
 import engine.world.ports.DefItemDTO;
-import engine.world.ports.DefWeaponDTO;
 import engine.world.ports.WorldDefinition;
 
 public abstract class AbstractLevelGenerator {

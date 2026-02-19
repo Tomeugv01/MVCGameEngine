@@ -7,6 +7,7 @@ public enum ActionType {
     GO_INSIDE,
     MOVE,
     NO_MOVE,
+    MOVE_REBOUND_FROM_BODY,
     MOVE_REBOUND_IN_EAST,
     MOVE_REBOUND_IN_WEST,
     MOVE_REBOUND_IN_NORTH,

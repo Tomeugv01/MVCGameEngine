@@ -179,7 +179,10 @@ public abstract class AbstractIAGenerator implements Runnable {
             }
 
             try {
-                Thread.sleep(this.rnd.nextInt(this.maxCreationDelay));
+                int sleepMillis = this.maxCreationDelay <= 0
+                        ? 1
+                        : this.rnd.nextInt(this.maxCreationDelay);
+                Thread.sleep(sleepMillis);
             } catch (InterruptedException ex) {
                 throw new RuntimeException(ex);
             }
