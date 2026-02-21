@@ -146,10 +146,10 @@ public class Renderer extends Canvas implements Runnable {
     private static final double CAMERA_SMOOTHING_FACTOR = 0.18d;
     private static final double CAMERA_MAX_SMOOTHING_FACTOR = 0.45d;
     private static final double CAMERA_SPEED_SMOOTHING_SCALE = 0.00005d;
-    private static final int MAX_TRAJECTORY_STEPS = 5000;
+    private static final int MAX_TRAJECTORY_STEPS = 8000;
     private static final double TRAJECTORY_STEP_SECONDS = 0.05d;
     private static final double TRAJECTORY_GRAVITY_MASS_COEFFICIENT = 0.08d;
-    private static final double TRAJECTORY_GRAVITY_MIN_DISTANCE = 250.0d;
+    private static final double TRAJECTORY_GRAVITY_MIN_DISTANCE = 100.0d;
     private static final int ORBIT_CLOSE_MIN_STEPS = 320;
     private static final double ORBIT_CLOSE_DISTANCE_MULTIPLIER = 2.0d;
     private static final double ORBIT_CLOSE_DIRECTION_DOT_MIN = 0.97d;
@@ -160,6 +160,21 @@ public class Renderer extends Canvas implements Runnable {
      *  Filters out near-stationary bodies like the sun that would otherwise
      *  show a phantom drift caused by n-body numerical integration. */
     private static final double PLANET_TRACE_MIN_SPEED = 0.5d;
+    /**
+     * One colour per orbiting body, cycling if there are more bodies than colours.
+     * Ordered loosely by distance from sun — Mercury grey, Venus amber, Earth blue,
+     * Moon silver, Mars red, Jupiter orange, Saturn gold, Uranus cyan.
+     */
+    private static final Color[] PLANET_TRACE_COLORS = {
+        new Color(190, 190, 190, 155), // Mercury — grey
+        new Color(255, 200,  80, 155), // Venus   — amber
+        new Color( 80, 180, 255, 155), // Earth   — sky blue
+        new Color(210, 210, 215, 130), // Moon    — silver
+        new Color(240,  80,  50, 155), // Mars    — red
+        new Color(255, 155,  60, 155), // Jupiter — deep orange
+        new Color(230, 200,  90, 155), // Saturn  — gold
+        new Color(100, 230, 235, 155), // Uranus  — cyan
+    };
     // Hill-sphere rings drawn around every planet
     private static final Color  HILL_SPHERE_RING_COLOR  = new Color(120, 200, 255, 45);
     // Player trajectory when inside a planet's Hill sphere (green = planet-relative orbit)
@@ -781,25 +796,45 @@ public class Renderer extends Canvas implements Runnable {
 
         float lineWidth = (float) (1.25d / Math.max(this.zoomFactor, 0.001d));
         g.setStroke(new BasicStroke(lineWidth, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-        g.setColor(new Color(255, 220, 120, 150));
+        // colour is set per-body inside the loop
 
-        for (GravitySourceDTO source : gravitySources) {
-            if (source == null || source.bodyId == null || source.bodyId.isBlank()) {
-                continue;
+        // --- Build and sort moving sources by distance from the world centre (sun)
+        //     so that colour assignments are stable and predictable: Mercury=grey,
+        //     Venus=amber, Earth=blue, Moon=silver, Mars=red, Jupiter=orange, etc.
+        double sunCX = worldDim.x * 0.5d;
+        double sunCY = worldDim.y * 0.5d;
+        // find the real sun position from the stationary source
+        for (GravitySourceDTO s : gravitySources) {
+            if (s != null && Math.hypot(s.velX, s.velY) < PLANET_TRACE_MIN_SPEED) {
+                sunCX = s.posX;
+                sunCY = s.posY;
+                break;
             }
+        }
+        final double sunFX = sunCX, sunFY = sunCY;
+
+        List<GravitySourceDTO> sortedMoving = new ArrayList<>();
+        for (GravitySourceDTO s : gravitySources) {
+            if (s == null || s.bodyId == null || s.bodyId.isBlank()) continue;
+            BodyData bd = this.view.getBodyData(s.bodyId);
+            if (bd == null || bd.getPhysicsValues() == null) continue;
+            double spd = Math.hypot(bd.getPhysicsValues().speedX, bd.getPhysicsValues().speedY);
+            if (spd >= PLANET_TRACE_MIN_SPEED) sortedMoving.add(s);
+        }
+        sortedMoving.sort((a, b) -> {
+            double da = Math.hypot(a.posX - sunFX, a.posY - sunFY);
+            double db = Math.hypot(b.posX - sunFX, b.posY - sunFY);
+            return Double.compare(da, db);
+        });
+
+        int colorIdx = 0;
+        for (GravitySourceDTO source : sortedMoving) {
+            g.setColor(PLANET_TRACE_COLORS[colorIdx % PLANET_TRACE_COLORS.length]);
+            colorIdx++;
 
             BodyData sourceBodyData = this.view.getBodyData(source.bodyId);
-            if (sourceBodyData == null || sourceBodyData.getPhysicsValues() == null) {
-                continue;
-            }
-
             PhysicsValuesMDTO phy = sourceBodyData.getPhysicsValues();
-
-            // Skip non-moving bodies (e.g. the sun) — they have no meaningful orbit to trace
             double speed = Math.hypot(phy.speedX, phy.speedY);
-            if (speed < PLANET_TRACE_MIN_SPEED) {
-                continue;
-            }
 
             double x = phy.posX;
             double y = phy.posY;

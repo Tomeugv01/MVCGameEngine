@@ -24,6 +24,12 @@ public final class SolarSystemWorldDefinitionProvider extends AbstractWorldDefin
     private static final double SUN_HALF_RADIUS    = 2600.0d * BODY_SIZE_SCALE * 0.5d; // 520
     private static final double SUN_GM             =
             GRAVITY_MASS_COEFF * SUN_HALF_RADIUS * SUN_HALF_RADIUS * SUN_HALF_RADIUS;
+    /**
+     * MUST stay in sync with Model.DYNAMIC_PLANET_MASS_MULT.
+     * Used here only to compute a moon's circular-orbit speed around its host planet,
+     * because the physics engine multiplies planet GM by this factor for all dynamic bodies.
+     */
+    private static final double DYNAMIC_PLANET_MASS_MULT = 2.0d;
 
     public SolarSystemWorldDefinitionProvider(DoubleVector worldDimension, ProjectAssets assets) {
         super(worldDimension, assets);
@@ -49,7 +55,7 @@ public final class SolarSystemWorldDefinitionProvider extends AbstractWorldDefin
         //  planet_01:  160 →  64 → 32 →   2,621  →    5,243           r =  5,500
         //  planet_02:  250 → 100 → 50 →  10,000  →   20,000           r =  8,200
         //  planet_04:  310 → 124 → 62 →  19,047  →   38,094  Earth    r = 12,000
-        //  moon_05:    120 →  48 → 24 →   1,106   orbits Earth at +500 units offset
+        //  moon_05:     50 →  20 → 10 →      80   orbits Earth at +200 units (0.16 × Hill sphere)
         //  planet_03:  220 →  88 → 44 →   6,839  →   13,678  Mars     r = 16,000
         //  planet_11:  400 → 160 → 80 →  40,960  →   81,920  Jupiter  r = 21,000
         //  planet_15:  380 → 152 → 76 →  35,070  →   70,140  Saturn   r = 28,000
@@ -59,13 +65,16 @@ public final class SolarSystemWorldDefinitionProvider extends AbstractWorldDefin
         this.addDynamicOrbitalBody("planet_02",  8200.0d,  60.0d, this.scaledBody(250.0d));
         this.addDynamicOrbitalBody("planet_04", 12000.0d, 105.0d, this.scaledBody(310.0d));
 
-        // Moon: 500 units east of Earth, inside its Hill sphere (~993 units for Earth/Sun masses).
-        // Compound velocity = Earth's solar orbit + Moon's circular orbit around Earth.
         DoubleVector earthPos = this.orbitPosition(12000.0d, 105.0d);
+
+        // Moon at 200 units from Earth (0.16 × Hill sphere radius ≈ 1249 u).
+        // Deep inside the stable zone; at 500 the solar tide destabilised the orbit.
+        // Moon seed kept small (50 → r=10) so its GM_eff = 0.08*10³*2 = 160,
+        // exerting only 0.016% of solar gravity on Earth — negligible drift.
         this.addBodyOrbitingPlanet("moon_05",
                 12000.0d, 105.0d, this.scaledBody(310.0d),
-                500.0d, 0.0d,
-                this.scaledBody(120.0d));
+                200.0d, 0.0d,
+                this.scaledBody(50.0d));
 
         this.addDynamicOrbitalBody("planet_03", 16000.0d, 145.0d, this.scaledBody(220.0d));
         this.addDynamicOrbitalBody("planet_11", 21000.0d, 210.0d, this.scaledBody(400.0d));
@@ -144,7 +153,10 @@ public final class SolarSystemWorldDefinitionProvider extends AbstractWorldDefin
 
         double moonR     = Math.sqrt(moonOffsetX * moonOffsetX + moonOffsetY * moonOffsetY);
         double hostHalfR = hostScaledSize * 0.5d;
-        double hostGM    = GRAVITY_MASS_COEFF * hostHalfR * hostHalfR * hostHalfR;
+        // hostGM must use DYNAMIC_PLANET_MASS_MULT because the physics engine applies that
+        // factor to every dynamic body's mass — without it the moon orbits too slowly and drifts.
+        double hostGM    = GRAVITY_MASS_COEFF * hostHalfR * hostHalfR * hostHalfR
+                         * DYNAMIC_PLANET_MASS_MULT;
         double vOrbit    = Math.sqrt(hostGM / Math.max(1.0d, moonR));
 
         // CCW tangent derived from host-to-moon unit vector

@@ -172,7 +172,7 @@ public class Model implements BodyEventProcessor, GravitySourceProvider {
     private static final int DEFAULT_BATCH_SIZE = 10;
     private static final boolean ENABLE_OBJECT_GRAVITY = true;
     private static final double GRAVITY_MASS_COEFFICIENT = 0.08d;
-    private static final double GRAVITY_MIN_DISTANCE = 250.0d;
+    private static final double GRAVITY_MIN_DISTANCE = 100.0d;
     /**
      * Mass multiplier applied to DYNAMIC planet bodies when exposed as gravity
      * sources. Must stay at 1.0 for orbital stability.
@@ -187,10 +187,11 @@ public class Model implements BodyEventProcessor, GravitySourceProvider {
      * player (via CentralGravityPhysicsEngine.isPlayer = true).  It does not
      * affect planet-planet interactions, so it can be raised freely without
      * any impact on orbital stability.
-     * At 12.0 × Earth: Hill sphere ≈ 2260 units, surface acceleration ≈ 18 u/s².
+     * At 30.0 × Earth: Hill sphere ≈ 3078 units, making capture orbits easy to plan.
+     * Surface acc at 200 u from Earth = 0.08*62³*30/200² ≈ 143 u/s² — strong Oberth pull.
      */
     private static final double DYNAMIC_PLANET_MASS_MULT   = 2.0d;
-    private static final double PLANET_PLAYER_GRAVITY_MULT = 12.0d;
+    private static final double PLANET_PLAYER_GRAVITY_MULT = 30.0d;
     // endregion
 
     // region Fields
